@@ -20999,7 +20999,10 @@ int main(int argc, char** argv) {
   std::fprintf(stderr, "[arity] b2 %d b4 %d pbeam %d,%d,%d\n", b2_width, beam, l2r_pbeam[0],
                l2r_pbeam[1], l2r_pbeam[2]);
   if (!rlt_beam_set) rlt_beam = beam;
-  if (!sweep_set) p2_sweep = true;
+  // Default sweep OFF: growth uses rec_node/pr_steps (hard14/OLD). Unset --sweep
+  // previously forced p2_sweep and routed rec_root through sw_as_rn (Ther |d|~5.7).
+  // Pass `--sweep` / `--sweep on` for the sweep backend.
+  if (!sweep_set) p2_sweep = false;
   if (!vsweep_set) p2_vsweep = true;
 
   if (arm_score && access_file.empty()) {
