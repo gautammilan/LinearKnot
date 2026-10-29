@@ -53,6 +53,15 @@
 // --beam-table T=B (repeatable): beam B (or inf) for table T only, T in Qb, Qm, Qm2, Qmp,
 //   PKM, Qp, Qg, Qgls, Qgl, Qgr, Qgrs; the others keep --beam.  Qm2 is dropped together
 //   with Qm while Qm2's beam is finite, then held to its own beam.
+// --b2 N: beam of the scan's two-index columns Qb, Qm, Qm2, Qp, Qmp, and of Q^z / Q^z_pre
+//   (writes those --beam-table entries; a later --beam-table wins for that table). Unset: 200.
+// --qzbar-old: build StemEst Qzbar as the Oct-8/incperf path does — dense full nested Qz→prQz,
+//   no beamed sparse Qz_pre (qz_on). Used by H_ex, K_L, pr_sf_build, and every other Qzbar read.
+// --b1 N: --nest-beam N, the nested pre-pass and the stem-estimate run at every length.
+//   Unset: 200, independent of --beam. 0 keeps every state.
+// --pbeam-ratio a:b:c: P1,P2,P3 beams = (a,b,c) times --beam. Unset: P1 is two-index, so
+//   its beam is b2; P2 and P3 stay 2 x b4 (the pk-l2r default 2000,2000 at b4 = 1000).
+//   An explicit --l2r-pbeam or --pbeam-ratio on the command line wins.
 // --dump-states PATH: after outside, every stored state's posterior weight (format at
 //   DP03::dump_states); run at --beam inf for exact weights.  --dump-min-w W: write only
 //   states with w >= W (the rest are summed per table).
@@ -103,8 +112,8 @@
 //   every profile score with the Result-19 score ("[profile-check]" stderr line).
 // --stem-est-chain off|on (default off; needs --stem-est-profile on, no --stem-est-ml-tail):
 //   pair profiles over arm chains of kept pairs (DP03::chain_node): pairs with nested pair
-//   probability >= --stem-est-chain-floor f (default 1e-7; exact nested run with outside for
-//   n <= 1000, else the beamed one), joined by interior steps (<= --stem-est-chain-loop Lc
+//   probability >= --stem-est-chain-floor f (default 1e-7; the b1 nested run), joined by
+//   interior steps (<= --stem-est-chain-loop Lc
 //   unpaired per side, default 30, capped by --loop-cap) and, with --stem-est-chain-ml on
 //   (default), multiloop steps (f: Qm on the left, <= ml-span unpaired on the right; g: <= cap
 //   unpaired on the left, nested Qm on the right; h: both; Qm sides <= --stem-est-chain-span
@@ -188,6 +197,7 @@
 static volatile std::sig_atomic_t g_cpu_stop = 0;
 static void on_cpu_stop(int) { g_cpu_stop = 1; }
 #include <string>
+#include <vector>
 static std::string g_v2dump;  // --pr-v2-dump
 static bool g_static_only = false;  // --pr-static-only: exit after the V / arm build
 static bool g_v2ratio = false;  // --pr-v-ratio2 on: Vr2 in place of V
@@ -221,6 +231,45 @@ static int g_ntr_KR = 0;
 // U-type scores read V (kept after the build; seed roots through the arm entries) in place of
 // the R side of the growth vectors, which is then not built (only its total, the --grow-ml-c rank).
 static bool g_rfv = false;
+// --miss-sample N PATH: reservoir of up to N lookups per class where the V map exists
+// and the entry is absent (kind ii). Classes: V (every mu_at), K and H on P3 and S.
+struct MissRec {
+  int st, x, y, b;
+};
+static int g_miss_cap = 0;
+static std::string g_miss_path;
+static std::vector<MissRec> g_miss[3];
+static long long g_miss_seen[3] = {};
+static uint32_t g_miss_rng = 1u;
+static uint32_t miss_urand() {
+  g_miss_rng = g_miss_rng * 1664525u + 1013904223u;
+  return g_miss_rng;
+}
+static void miss_take(int kind, int st, int x, int y, int b) {
+  if (g_miss_cap <= 0 || kind < 0 || kind > 2) return;
+  long long& seen = g_miss_seen[kind];
+  auto& buf = g_miss[kind];
+  ++seen;
+  const MissRec rec{st, x, y, b};
+  if (static_cast<int>(buf.size()) < g_miss_cap) {
+    buf.push_back(rec);
+    return;
+  }
+  if (seen <= 0) return;
+  const uint64_t j = (static_cast<uint64_t>(miss_urand()) << 32 | miss_urand()) %
+                     static_cast<uint64_t>(seen);
+  if (j < static_cast<uint64_t>(g_miss_cap)) buf[static_cast<size_t>(j)] = rec;
+}
+// --v-query IN OUT: after the lazy V build, print each sample's log weight and the
+// largest left-end in that map. H lines (b < 0) scan partner pairs (x, y>j).
+struct VQ {
+  int tag, st, x, y, b;
+};
+static std::string g_vquery_out;
+static std::vector<VQ> g_vquery;
+static std::string g_vtrace_path;
+static std::string g_mu_dump;
+static std::string g_eq_path;
 // --grow-node-trunc-z bar: the node ranking's arm weight 1/Qz(xs, x') from the pre-pass Qzbar
 // (scan: the scan's Qz, which is -inf for x' past the scan position at the first ranking call)
 static bool g_ntr_zbar = false;
@@ -230,6 +279,7 @@ struct CpuStop {};
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <memory>
 #include <queue>
@@ -246,6 +296,10 @@ struct CpuStop {};
 
 #include <unistd.h>
 #include <malloc.h>
+#include <execinfo.h>
+#include <fcntl.h>
+#include <sys/time.h>
+#include <sys/resource.h>
 
 static void mtrim() {
   if (g_mtrim) malloc_trim(0);
@@ -337,6 +391,11 @@ bool single_stems = true;
 // NUPACK 3: pairs bordering exterior / multi / Qz regions must be Watson-Crick.
 bool wc_ends = false;
 double pair_bonus = 0.0;
+// Multiloop leading unpaired run, every pass: closing left p and first branch i
+// satisfy i - p - 1 <= ml_lead_cap - 1 (29 when the flag is 30, p >= i - 30).
+// 0 turns the cap off. Interior loops, the trailing run, between-branch runs,
+// the exterior, and Q^z stay on their own rules.
+int ml_lead_cap = 30;
 const std::vector<std::pair<int, int>>* allowed_pairs = nullptr;  // 0-based, nullptr = all
 
 // pair types: AU CG GC GU UA UG
@@ -693,8 +752,12 @@ struct Energy {
       d3w.resize(n);
       s1w.resize(n);
       for (int k = 0; k < n; ++k) {
-        double d5 = k == 0 ? 0.0 : T99.dangle[code[k - 1] * 4 + code[k]];
-        double d3 = k == n - 1 ? 0.0 : T99.dangle[24 + (3 - code[k + 1]) * 4 + code[k]];
+        // Non-ACGU (N): dangle / mismatch terms that read it are 0 (LinearPartition-style).
+        double d5 = 0.0, d3 = 0.0;
+        if (k > 0 && code[k - 1] >= 0 && code[k] >= 0)
+          d5 = T99.dangle[code[k - 1] * 4 + code[k]];
+        if (k < n - 1 && code[k + 1] >= 0 && code[k] >= 0)
+          d3 = T99.dangle[24 + (3 - code[k + 1]) * 4 + code[k]];
         d5w[k] = log_weight(d5);
         d3w[k] = log_weight(d3);
         s1w[k] = log_weight(dangles_mode == 1 && 0 < k && k < n - 1 ? std::min(d3, d5)
@@ -774,6 +837,14 @@ struct Energy {
 
  private:
   // ---- rna1999 (kcal/mol), ene.c HairpinEnergy / InteriorEnergyFull / asymmetryEfn
+  // code[k] is -1 for any non-ACGU base (N). Those bases cannot pair; loop lengths still
+  // count them; every dangle / mismatch / special-hairpin term that would read an N is 0.
+  bool okb(int k) const { return code[k] >= 0; }
+  bool ok_range(int lo, int hi) const {
+    for (int k = lo; k <= hi; ++k)
+      if (code[k] < 0) return false;
+    return true;
+  }
   int b(int k) const { return code[k] + 1; }
   static double size_log(int size) { return 1.75 * RT * std::log(size / 30.0); }
   static double helix99(int a, int bb, int c, int d) {
@@ -796,18 +867,24 @@ struct Energy {
     bool poly_c = crun[j] - crun[i + 1] == size;
     if (size == 3) {
       if (b(i) != 2 && b(j) != 2) g += T.at_penalty;
-      int idx = 0;
-      for (int k = i; k <= j; ++k) idx = idx * 4 + code[k];
-      g += T.tri[idx];
+      if (ok_range(i, j)) {
+        int idx = 0;
+        for (int k = i; k <= j; ++k) idx = idx * 4 + code[k];
+        g += T.tri[idx];
+      }
       if (poly_c) g += T.polyc3;
     } else if (size == 4) {
-      int idx = 0;
-      for (int k = i; k <= j; ++k) idx = idx * 4 + code[k];
-      g += T.tetra[idx];
-      g += T.mm_hp[(4 * (b(i + 1) - 1) + (b(j - 1) - 1)) * 6 + mshift(b(i), b(j))];
+      if (ok_range(i, j)) {
+        int idx = 0;
+        for (int k = i; k <= j; ++k) idx = idx * 4 + code[k];
+        g += T.tetra[idx];
+      }
+      if (okb(i + 1) && okb(j - 1))
+        g += T.mm_hp[(4 * (b(i + 1) - 1) + (b(j - 1) - 1)) * 6 + mshift(b(i), b(j))];
       if (poly_c) g += T.polyc_slope * size + T.polyc_int;
     } else {
-      g += T.mm_hp[(4 * (b(i + 1) - 1) + (b(j - 1) - 1)) * 6 + mshift(b(i), b(j))];
+      if (okb(i + 1) && okb(j - 1))
+        g += T.mm_hp[(4 * (b(i + 1) - 1) + (b(j - 1) - 1)) * 6 + mshift(b(i), b(j))];
       if (poly_c) g += T.polyc_slope * size + T.polyc_int;
     }
     return g;
@@ -857,8 +934,8 @@ struct Energy {
     if (asym > 1 || size > 4) {
       double g = asymmetry99(l1, l2, size);
       if (l1 > 1 && l2 > 1) {
-        g += interior_mm(b(e), b(d), b(e + 1), b(d - 1));
-        g += interior_mm(b(i), b(j), b(i + 1), b(j - 1));
+        if (okb(e + 1) && okb(d - 1)) g += interior_mm(b(e), b(d), b(e + 1), b(d - 1));
+        if (okb(i + 1) && okb(j - 1)) g += interior_mm(b(i), b(j), b(i + 1), b(j - 1));
       } else {
         g += interior_mm(b(e), b(d), 1, 1);
         g += interior_mm(b(i), b(j), 1, 1);
@@ -866,19 +943,23 @@ struct Energy {
       return g;
     }
     if (asym == 0 && size == 2) {
+      if (!(okb(i + 1) && okb(j - 1))) return 0.0;
       int cpi = mshift(b(i), b(j)), ipi = mshift(b(d), b(e));
       return 0.0 + T.sint2[96 * cpi + 16 * ipi + 4 * (b(i + 1) - 1) + (b(j - 1) - 1)];
     }
     if (asym == 0 && size == 4) {
+      if (!(okb(i + 1) && okb(i + 2) && okb(j - 1) && okb(j - 2))) return 0.0;
       int cpi = mshift(b(i), b(j)), ipi = mshift(b(d), b(e));
       return 0.0 + T.sint4[cpi * 1536 + ipi * 256 + (4 * (b(i + 1) - 1) + b(j - 1) - 1) * 16 +
                            (4 * (b(i + 2) - 1) + b(j - 2) - 1)];
     }
     if (l1 == 1) {
+      if (!(okb(i + 1) && okb(j - 1) && okb(j - 2))) return 0.0;
       int cpi = mshift(b(i), b(j)), ipi = mshift(b(d), b(e));
       return 0.0 + T.asint1x2[cpi * 384 + (b(j - 2) - 1) * 96 + (b(i + 1) - 1) * 24 + 4 * ipi +
                               ((b(j - 1) - 1) % 4)];
     }
+    if (!(okb(i + 1) && okb(i + 2) && okb(j - 1))) return 0.0;
     int cpi = mshift(b(j), b(i)), ipi = mshift(b(e), b(d));
     return 0.0 + T.asint1x2[ipi * 384 + (b(i + 1) - 1) * 96 + (b(j - 1) - 1) * 24 + 4 * cpi +
                             ((b(i + 2) - 1) % 4)];
@@ -1017,34 +1098,120 @@ struct Energy {
 // ---------------------------------------------------- insertion-ordered maps
 // int key in [0, n) -> double; deleted keys leave a tombstone (key = -1) so
 // re-insertion goes to the end, like a Python dict.
+// Open-addressed key -> slot. Keys are >= 0. Empty is -1, tombstone is -2.
+struct Ix {
+  std::vector<int> k, v;
+  uint32_t mask = 0;
+  int live = 0, tombs = 0;
+
+  static uint32_t hash(int x) { return static_cast<uint32_t>(x) * 0x9e3779b1u; }
+  void clear() { k.clear(); v.clear(); mask = 0; live = tombs = 0; }
+  double bytes() const {
+    return (k.capacity() ? static_cast<double>(k.capacity() * sizeof(int) + 16) : 0.0) +
+           (v.capacity() ? static_cast<double>(v.capacity() * sizeof(int) + 16) : 0.0);
+  }
+  void grow() {
+    size_t cap = k.empty() ? 8 : k.size() * 2;
+    std::vector<int> nk(cap, -1), nv(cap);
+    uint32_t m = static_cast<uint32_t>(cap - 1);
+    for (size_t i = 0; i < k.size(); ++i) {
+      if (k[i] < 0) continue;
+      uint32_t s = hash(k[i]) & m;
+      while (nk[s] >= 0) s = (s + 1) & m;
+      nk[s] = k[i];
+      nv[s] = v[i];
+    }
+    k.swap(nk);
+    v.swap(nv);
+    mask = m;
+    tombs = 0;
+  }
+  int slot_of(int key) const {
+    if (k.empty() || key < 0) return -1;
+    uint32_t s = hash(key) & mask;
+    for (;;) {
+      int c = k[s];
+      if (c == key) return v[s];
+      if (c == -1) return -1;
+      s = (s + 1) & mask;
+    }
+  }
+  void put(int key, int slot) {
+    if (k.empty() || (live + tombs + 1) * 2 > static_cast<int>(k.size())) grow();
+    uint32_t s = hash(key) & mask;
+    int tomb = -1;
+    for (;;) {
+      int c = k[s];
+      if (c == key) {
+        v[s] = slot;
+        return;
+      }
+      if (c == -2 && tomb < 0) tomb = static_cast<int>(s);
+      if (c == -1) {
+        if (tomb >= 0) {
+          k[tomb] = key;
+          v[tomb] = slot;
+          --tombs;
+        } else {
+          k[s] = key;
+          v[s] = slot;
+        }
+        ++live;
+        return;
+      }
+      s = (s + 1) & mask;
+    }
+  }
+  void del(int key) {
+    if (k.empty() || key < 0) return;
+    uint32_t s = hash(key) & mask;
+    for (;;) {
+      int c = k[s];
+      if (c == key) {
+        k[s] = -2;
+        --live;
+        ++tombs;
+        return;
+      }
+      if (c == -1) return;
+      s = (s + 1) & mask;
+    }
+  }
+};
+
 struct OMap {
   std::vector<int> keys;
   std::vector<double> vals;
-  std::vector<int> pos;
+  Ix pos;
   int live = 0;
 
-  void init(int n) { pos.assign(n, -1); }
-  bool has(int k) const { return pos[k] >= 0; }
+  void init(int) {
+    keys.clear();
+    vals.clear();
+    pos.clear();
+    live = 0;
+  }
+  bool has(int k) const { return pos.slot_of(k) >= 0; }
   double get(int k) const {
-    int p = pos[k];
+    int p = pos.slot_of(k);
     return p >= 0 ? vals[p] : NEG_INF;
   }
   void set(int k, double v) {
-    int p = pos[k];
+    int p = pos.slot_of(k);
     if (p >= 0) {
       vals[p] = v;
       return;
     }
-    pos[k] = static_cast<int>(keys.size());
+    pos.put(k, static_cast<int>(keys.size()));
     keys.push_back(k);
     vals.push_back(v);
     ++live;
   }
   void erase(int k) {
-    int p = pos[k];
+    int p = pos.slot_of(k);
     if (p < 0) return;
     keys[p] = -1;
-    pos[k] = -1;
+    pos.del(k);
     --live;
   }
   // Drops tombstones, keeping live keys in insertion order.  Must not be
@@ -1056,11 +1223,12 @@ struct OMap {
       if (k < 0) continue;
       keys[w] = k;
       vals[w] = vals[r];
-      pos[k] = static_cast<int>(w);
       ++w;
     }
     keys.resize(w);
     vals.resize(w);
+    pos.clear();
+    for (size_t r = 0; r < w; ++r) pos.put(keys[r], static_cast<int>(r));
     if (keys.capacity() > 2 * w + 16) {
       keys.shrink_to_fit();
       vals.shrink_to_fit();
@@ -1068,6 +1236,138 @@ struct OMap {
   }
   bool sparse() const { return keys.size() > 2 * static_cast<size_t>(live) + 16; }
   size_t slots() const { return keys.size(); }
+};
+
+// Nested table stored as the kept keys of one OMap column. ix(i, j) = i * n + j.
+// A read of a missing key is NEG_INF. Assigning NEG_INF drops the key.
+struct AtView {
+  std::vector<OMap>* cols = nullptr;
+  int n = 0;
+  void bind(std::vector<OMap>* c, int n_) { cols = c; n = n_; }
+  bool empty() const { return n == 0 || cols == nullptr; }
+  std::vector<double> dense() const {
+    std::vector<double> o(static_cast<size_t>(n) * n, NEG_INF);
+    if (!cols) return o;
+    for (int j = 0; j < n; ++j)
+      for (size_t r = 0; r < (*cols)[j].slots(); ++r) {
+        int i = (*cols)[j].keys[r];
+        if (i >= 0) o[static_cast<size_t>(i) * n + j] = (*cols)[j].vals[r];
+      }
+    return o;
+  }
+  struct Proxy {
+    OMap* col;
+    int i;
+    operator double() const { return col->get(i); }
+    Proxy& operator=(double v) {
+      if (v < HALF_NEG) {
+        if (col->has(i)) col->erase(i);
+      } else {
+        col->set(i, v);
+      }
+      return *this;
+    }
+    Proxy& operator=(const Proxy& o) { return *this = static_cast<double>(o); }
+  };
+  Proxy operator[](size_t k) { return Proxy{&(*cols)[k % static_cast<size_t>(n)], static_cast<int>(k / n)}; }
+  double operator[](size_t k) const { return (*cols)[k % static_cast<size_t>(n)].get(static_cast<int>(k / n)); }
+};
+
+// Outside (and other) values that are finite only on kept keys. Same ix layout.
+struct SpMat {
+  int n = 0;
+  std::vector<OMap> col;
+  void init(int n_) {
+    n = n_;
+    col.assign(n_, {});
+  }
+  bool empty() const { return n == 0; }
+  void clear() { col.clear(); n = 0; }
+  long long finite() const {
+    long long e = 0;
+    for (const OMap& m : col) e += m.live;
+    return e;
+  }
+  double bytes() const {
+    double b = col.capacity() ? static_cast<double>(col.capacity() * sizeof(OMap) + 16) : 0.0;
+    for (const OMap& m : col)
+      b += (m.keys.capacity() ? static_cast<double>(m.keys.capacity() * sizeof(int) + 16) : 0.0) +
+           (m.vals.capacity() ? static_cast<double>(m.vals.capacity() * sizeof(double) + 16) : 0.0) +
+           m.pos.bytes();
+    return b;
+  }
+  std::vector<double> dense() const {
+    std::vector<double> o(static_cast<size_t>(n) * n, NEG_INF);
+    for (int j = 0; j < n; ++j)
+      for (size_t r = 0; r < col[j].slots(); ++r) {
+        int i = col[j].keys[r];
+        if (i >= 0) o[static_cast<size_t>(i) * n + j] = col[j].vals[r];
+      }
+    return o;
+  }
+  struct Proxy {
+    OMap* col;
+    int i;
+    operator double() const { return col->get(i); }
+    Proxy& operator=(double v) {
+      if (v < HALF_NEG) {
+        if (col->has(i)) col->erase(i);
+      } else {
+        col->set(i, v);
+      }
+      return *this;
+    }
+    Proxy& operator=(const Proxy& o) { return *this = static_cast<double>(o); }
+  };
+  Proxy operator[](size_t k) { return Proxy{&col[k % static_cast<size_t>(n)], static_cast<int>(k / n)}; }
+  double operator[](size_t k) const { return col[k % static_cast<size_t>(n)].get(static_cast<int>(k / n)); }
+};
+
+// Qz is finite on every i <= j, so the column is a packed triangle rather than a hash.
+struct TriMat {
+  int n = 0;
+  std::vector<std::vector<double>> col;
+  void init(int n_) {
+    n = n_;
+    col.resize(n_);
+    for (int j = 0; j < n_; ++j) col[j].assign(j + 1, NEG_INF);
+  }
+  bool empty() const { return n == 0; }
+  long long finite() const {
+    long long e = 0;
+    for (const auto& c : col)
+      for (double x : c) e += x > HALF_NEG;
+    return e;
+  }
+  double bytes() const {
+    double b = col.capacity() ? static_cast<double>(col.capacity() * sizeof(std::vector<double>) + 16) : 0.0;
+    for (const auto& c : col)
+      if (c.capacity()) b += static_cast<double>(c.capacity() * sizeof(double) + 16);
+    return b;
+  }
+  struct Proxy {
+    TriMat* m;
+    int i, j;
+    operator double() const {
+      if (j < 0 || j >= m->n || i < 0 || i >= static_cast<int>(m->col[j].size())) return NEG_INF;
+      return m->col[j][i];
+    }
+    Proxy& operator=(double v) {
+      if (j < 0 || j >= m->n || i < 0) return *this;
+      if (i >= static_cast<int>(m->col[j].size())) m->col[j].resize(i + 1, NEG_INF);
+      m->col[j][i] = v;
+      return *this;
+    }
+    Proxy& operator=(const Proxy& o) { return *this = static_cast<double>(o); }
+  };
+  Proxy operator[](size_t k) {
+    return Proxy{this, static_cast<int>(k / n), static_cast<int>(k % static_cast<size_t>(n))};
+  }
+  double operator[](size_t k) const {
+    int i = static_cast<int>(k / n), j = static_cast<int>(k % static_cast<size_t>(n));
+    if (j < 0 || j >= n || i < 0 || i >= static_cast<int>(col[j].size())) return NEG_INF;
+    return col[j][i];
+  }
 };
 
 // Values over [0, n) with NEG_INF for absent keys; keys() in first-insertion order.
@@ -1431,6 +1731,104 @@ struct GateStats {
   long long cand[2] = {}, elig[2] = {}, ranked[2] = {}, kept[2] = {}, reserved[2] = {};
 };
 
+// --beam-stats=<file>: opt-in TSV logging only (no change to ranking keys or keep sets).
+// pruned_key_share = sum_{pruned} exp(key) / sum_{all finite} exp(key) (0 if denom is 0).
+// One P/Q row per (pass, table, position); pass is stem|pass1|pass2|scan (set by the driver).
+struct BeamStats {
+  FILE* f = nullptr;
+  std::string pass = "-";
+  struct Agg {
+    long long n_pos = 0, n_full = 0;
+    double sum_share = 0.0, max_share = 0.0;
+  };
+  // Key = pass + "\t" + table so stem/pass1/scan summaries stay separate.
+  std::map<std::string, Agg> by_table;
+  void open(const std::string& path) {
+    f = std::fopen(path.c_str(), "w");
+    if (!f) return;
+    std::fprintf(f, "# beam-stats TSV: Q pass t logQ_1_t | P pass table t candidates kept "
+                    "pruned_key_share full | S pass table n_pos n_full max_share mean_share\n");
+    std::fprintf(f, "kind\tpass\tname\tt\tcandidates\tkept\tpruned_key_share\tfull\n");
+    std::fflush(f);
+  }
+  void set_pass(const char* p) { pass = p ? p : "-"; }
+  static double mass_share(const std::vector<double>& keys, size_t keep_n) {
+    // keys sorted descending (best first); first keep_n kept, rest pruned.
+    double mx = NEG_INF;
+    for (double k : keys)
+      if (k > mx && k > HALF_NEG) mx = k;
+    if (!(mx > HALF_NEG)) return 0.0;
+    double all = 0.0, pr = 0.0;
+    for (size_t i = 0; i < keys.size(); ++i) {
+      if (!(keys[i] > HALF_NEG)) continue;
+      const double w = std::exp(keys[i] - mx);
+      all += w;
+      if (i >= keep_n) pr += w;
+    }
+    return all > 0.0 ? pr / all : 0.0;
+  }
+  void log_Q(int t, double logq) {
+    if (!f) return;
+    std::fprintf(f, "Q\t%s\tQ1t\t%d\t-\t-\t%.17g\t-\n", pass.c_str(), t, logq);
+  }
+  void log_prune(const char* table, int t, size_t cand, size_t kept, double share, int full) {
+    if (!f) return;
+    std::fprintf(f, "P\t%s\t%s\t%d\t%zu\t%zu\t%.17g\t%d\n", pass.c_str(), table, t, cand, kept,
+                 share, full);
+    Agg& a = by_table[pass + "\t" + table];
+    ++a.n_pos;
+    if (full) ++a.n_full;
+    a.sum_share += share;
+    if (share > a.max_share) a.max_share = share;
+  }
+  // Unsorted keys + keep mask: compute share of pruned mass.
+  void log_prune_mask(const char* table, int t, const std::vector<double>& keys,
+                      const std::vector<char>& keep, int beam) {
+    if (!f) return;
+    const size_t cand = keys.size();
+    size_t kept = 0;
+    for (char k : keep)
+      if (k) ++kept;
+    double mx = NEG_INF;
+    for (double k : keys)
+      if (k > mx && k > HALF_NEG) mx = k;
+    double all = 0.0, pr = 0.0;
+    if (mx > HALF_NEG) {
+      for (size_t i = 0; i < keys.size(); ++i) {
+        if (!(keys[i] > HALF_NEG)) continue;
+        const double w = std::exp(keys[i] - mx);
+        all += w;
+        if (!keep[i]) pr += w;
+      }
+    }
+    const double share = all > 0.0 ? pr / all : 0.0;
+    const int full = (beam > 0 && static_cast<int>(cand) > beam) ? 1 : 0;
+    log_prune(table, t, cand, kept, share, full);
+  }
+  void flush_summary() {
+    if (!f) return;
+    for (const auto& kv : by_table) {
+      const Agg& a = kv.second;
+      const double mean = a.n_pos ? a.sum_share / static_cast<double>(a.n_pos) : 0.0;
+      // kv.first is "pass\ttable"
+      const size_t tab = kv.first.find('\t');
+      const std::string p = tab == std::string::npos ? "-" : kv.first.substr(0, tab);
+      const std::string name = tab == std::string::npos ? kv.first : kv.first.substr(tab + 1);
+      std::fprintf(f, "S\t%s\t%s\t%lld\t%lld\t%.17g\t%.17g\t-\n", p.c_str(), name.c_str(),
+                   static_cast<long long>(a.n_pos), static_cast<long long>(a.n_full), a.max_share,
+                   mean);
+    }
+    std::fflush(f);
+  }
+  void close() {
+    if (!f) return;
+    flush_summary();
+    std::fclose(f);
+    f = nullptr;
+  }
+};
+static BeamStats g_beam_stats;
+
 // Beamed tables, for --beam-table (per-table beams) and the state / drop dumps.
 enum BeamTable { BT_QB, BT_QM, BT_QM2, BT_QMP, BT_PKM, BT_QP, BT_QG, BT_QGLS, BT_QGL, BT_QGR,
                  BT_QGRS, BT_N };
@@ -1546,7 +1944,7 @@ struct StemEst {
   std::vector<double> prLP;
   long long bml_check_cells = 0, bml_check_mis = 0;
   double bml_check_rel = 0.0, pr_prep_sec = 0.0, prof_qz_pre = 0.0;
-  // --qz-beam: Q^z_pre kept per right end l (starts k, sorted). qz_on == 0 is the dense nested copy.
+  // Q^z_pre kept per right end l (starts k, sorted by C(k-1)+Q^z). qz_on == 0 is the dense copy.
   struct QzEnt {
     int k;
     double q, p, u1, u2;
@@ -1709,6 +2107,66 @@ static void mem_log(const char* stage, const std::vector<MemItem>& items = {}) {
   g_mem_cpu = c;
 }
 
+// --sample-prof PATH: SIGPROF samples of the scan (dp.pfunc), 100 Hz. perf and
+// gperftools are not installed here. Frames need a binary built with
+// -fno-omit-frame-pointer. Off unless the flag is passed.
+static int g_sample_fd = -1;
+static void sample_on_sig(int) {
+  void* stack[48];
+  int n = backtrace(stack, 48);
+  if (n < 1) n = 1;
+  if (n > 48) n = 48;
+  unsigned char nb = static_cast<unsigned char>(n);
+  if (g_sample_fd >= 0) {
+    ssize_t w = write(g_sample_fd, &nb, 1);
+    if (w == 1) {
+      const size_t bytes = static_cast<size_t>(n) * sizeof(void*);
+      ssize_t left = static_cast<ssize_t>(bytes);
+      const char* p = reinterpret_cast<const char*>(stack);
+      while (left > 0) {
+        ssize_t k = write(g_sample_fd, p, static_cast<size_t>(left));
+        if (k <= 0) break;
+        p += k;
+        left -= k;
+      }
+    }
+  }
+}
+static void sample_start(const char* path) {
+  g_sample_fd = open(path, O_CREAT | O_TRUNC | O_WRONLY, 0644);
+  if (g_sample_fd < 0) {
+    std::perror(path);
+    return;
+  }
+  const char magic[4] = {'S', 'A', 'M', 'P'};
+  const uint64_t anchor = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(&sample_on_sig));
+  if (write(g_sample_fd, magic, 4) != 4 || write(g_sample_fd, &anchor, sizeof anchor) != static_cast<ssize_t>(sizeof anchor)) {
+    std::perror(path);
+    return;
+  }
+  struct sigaction sa;
+  std::memset(&sa, 0, sizeof sa);
+  sa.sa_handler = sample_on_sig;
+  sigemptyset(&sa.sa_mask);
+  sa.sa_flags = SA_RESTART;
+  sigaction(SIGPROF, &sa, nullptr);
+  struct itimerval it;
+  std::memset(&it, 0, sizeof it);
+  it.it_interval.tv_usec = 10000;
+  it.it_value.tv_usec = 10000;
+  setitimer(ITIMER_PROF, &it, nullptr);
+  std::fprintf(stderr, "[sample] on %s 100 Hz\n", path);
+}
+static void sample_stop() {
+  struct itimerval it;
+  std::memset(&it, 0, sizeof it);
+  setitimer(ITIMER_PROF, &it, nullptr);
+  if (g_sample_fd >= 0) {
+    close(g_sample_fd);
+    g_sample_fd = -1;
+  }
+}
+
 // ------------------------------------------------------------------- DP03
 class DP03 {
  public:
@@ -1727,7 +2185,6 @@ class DP03 {
     for (int t = 0; t < BT_N; ++t)
       tbeam[t] = table_beam && table_beam[t] >= 0 ? table_beam[t] : this->beam;
     alloc();
-    build_pairs();
   }
 
   DropLog* drops = nullptr;
@@ -1739,6 +2196,8 @@ class DP03 {
   GateStats gate_stats;
 
   double pfunc() {
+    // The nested pass (no pseudoknots) walks mates and does not build the pair list.
+    if (l2r_mode != 0 || allow_pk) ensure_pairs();
     for (int j = 0; j < n; ++j) {
       cur_j = j;
       cpu_stop_check(0);
@@ -1756,38 +2215,70 @@ class DP03 {
       }
       if (allow_pk && l2r_mode != 0) {
         l2r_step_pk(j);
-        if (l2r_mode == 1) prune2(Qp, Qp_at[j], j, BT_QP, nullptr, nullptr);
+        if (l2r_mode == 1) {
+          const int pre = Qp_at[j].live;
+          prune2(Qp, Qp_at[j], j, BT_QP, nullptr, nullptr);
+          const int kept = Qp_at[j].live;
+          qp_pre_n += pre;
+          qp_kept_n += kept;
+          qp_pre_max = std::max(qp_pre_max, pre);
+          qp_kept_max = std::max(qp_kept_max, kept);
+          qp_beam = tbeam[BT_QP];
+          if (tbeam[BT_QP] > 0 && pre > tbeam[BT_QP]) ++qp_bind_n;
+        }
       }
       if (l2r_mode != 0) l2r_done[LT_QP] = j;
-      fill_Qb(j);
+      {
+        const auto tq = std::chrono::steady_clock::now();
+        fill_Qb(j);
+        sec_qb += std::chrono::duration<double>(std::chrono::steady_clock::now() - tq).count();
+      }
       prune2(Qb, Qb_at[j], j, BT_QB, nullptr, nullptr);
       if (l2r_mode != 0) l2r_done[LT_QB] = j;
+      if (l2r_mode == 0 && !allow_pk) {
+        const auto ti = std::chrono::steady_clock::now();
+        lp_push_interior(j);
+        sec_qb += std::chrono::duration<double>(std::chrono::steady_clock::now() - ti).count();
+      } else if (l2r_mode != 0) {
+        build_qlead(j);
+      }
       fill_Qm(j);
       // Qm2 is dropped with Qm (its keys are a subset of Qm's), unless Qm2's own beam is
       // infinite; then it gets its own beam.  With equal beams the second call is a no-op.
-      if (tbeam[BT_QM2] > 0) prune2(Qm, Qm_at[j], j, BT_QM, &Qm2, &Qm2_at[j]);
-      else prune2(Qm, Qm_at[j], j, BT_QM, nullptr, nullptr);
+      {
+        const int pre = Qm_at[j].live;
+        if (tbeam[BT_QM2] > 0) prune2(Qm, Qm_at[j], j, BT_QM, &Qm2, &Qm2_at[j]);
+        else prune2(Qm, Qm_at[j], j, BT_QM, nullptr, nullptr);
+        const int kept = Qm_at[j].live;
+        qm_pre_n += pre;
+        qm_kept_n += kept;
+        qm_pre_max = std::max(qm_pre_max, pre);
+        qm_kept_max = std::max(qm_kept_max, kept);
+        qm_beam = tbeam[BT_QM];
+        if (tbeam[BT_QM] > 0 && pre > tbeam[BT_QM]) ++qm_bind_n;
+      }
       prune2(Qm2, Qm2_at[j], j, BT_QM2, nullptr, nullptr);
+      if (l2r_mode == 0 && !allow_pk) lp_emit_multi(j);
       if ((allow_pk || chain_qmp) && E.stem_ml) {
         fill_Qmp(j);
         prune2(Qmp, Qmp_at[j], j, BT_QMP, nullptr, nullptr);
       }
+      qm_reindex(j);
       if (l2r_mode != 0) l2r_done[LT_QM] = j;
-      if (qz_beam_fill) {
-        if (prof_on) {
-          SecTimer t(prof_qz_sec);
-          fill_Qz_kept(j);
-        } else {
-          fill_Qz_kept(j);
-        }
-      } else if (prof_on) {
-        SecTimer t(prof_qz_sec);
-        fill_Qz(j);
-      } else {
-        fill_Qz(j);
+      {
+        const auto tq = std::chrono::steady_clock::now();
+        if (qz_beam_fill) fill_Qz_kept(j);
+        else fill_Qz(j);
+        const double dt = std::chrono::duration<double>(std::chrono::steady_clock::now() - tq).count();
+        sec_qz += dt;
+        if (prof_on) prof_qz_sec += dt;
       }
       if (l2r_mode != 0) l2r_done[LT_QZ] = j;
-      fill_C(j);
+      {
+        const auto tq = std::chrono::steady_clock::now();
+        fill_C(j);
+        sec_c += std::chrono::duration<double>(std::chrono::steady_clock::now() - tq).count();
+      }
       advance_pk_inside(j);
       if (keep_runs && dz) save_runs(j);
       if (allow_pk && l2r_mode != 1) {
@@ -1795,6 +2286,8 @@ class DP03 {
         prune4(Qgrs[j], BT_QGRS, j);
       }
       if (allow_pk && l2r_mode != 0) l2r_step_end(j);
+      if (l2r_mode != 0) note_col();
+      if (g_beam_stats.f) g_beam_stats.log_Q(j + 1, C[j]);  // log Q_{1,t} = C[t-1] (1-based t=j+1)
       if (mem_scan && n >= 4 && (j + 1) % (n / 4) == 0 && j + 1 < n) {
         std::vector<MemItem> it;
         mem_items(it, "", false, true);
@@ -1803,7 +2296,52 @@ class DP03 {
     }
     inside_done = true;
     logZ = n > 0 ? C[n - 1] : 0.0;
+    if (n > 0 && l2r_mode == 0) {
+      long long qb_n = 0, qm_n = 0;
+      for (int j = 0; j < n; ++j) {
+        qb_n += Qb_at[j].live;
+        qm_n += Qm_at[j].live;
+      }
+      const double dn = static_cast<double>(n);
+      std::fprintf(stderr,
+                   "[p1rule] n %d lead %d hair %.3f int %.3f m2xP %.3f m2multi %.3f multi_ext %.3f "
+                   "m_m_u %.3f m_p %.3f extC %.3f qz_cand %.3f qb_live %.3f qm_live %.3f\n",
+                   n, ml_lead_cap, r_hair / dn, r_int / dn, r_m2xp / dn, r_m2multi / dn,
+                   r_muext / dn, r_mmu / dn, r_mp / dn, r_extc / dn,
+                   static_cast<double>(qz_cand) / dn, qb_n / dn, qm_n / dn);
+      std::fprintf(stderr, "[p1sec] qb %.6f qm %.6f branch %.6f qz %.6f c %.6f\n", sec_qb, sec_qm,
+                   sec_branch, sec_qz, sec_c);
+      const double ms = 1000.0 / dn;
+      const double rule = sec_hair + sec_int + sec_m2xp + sec_emit + sec_mclose + sec_mp + sec_c + sec_qz;
+      const double pfunc_s = sec_qb + sec_qm + sec_branch + sec_qz + sec_c;
+      std::fprintf(stderr,
+                   "[p1ms] hair %.4f int %.4f m2xp %.4f emit %.4f mclose %.4f m %.4f c %.4f "
+                   "qz %.4f sum %.4f pfunc %.4f\n",
+                   sec_hair * ms, sec_int * ms, sec_m2xp * ms, sec_emit * ms, sec_mclose * ms,
+                   sec_mp * ms, sec_c * ms, sec_qz * ms, rule * ms, pfunc_s * ms);
+      std::fprintf(stderr, "[p1z] %.17g\n", logZ);
+    }
+    if (grammar_simple && n > 0) {
+      const double dn = static_cast<double>(n);
+      std::fprintf(stderr,
+                   "[grammar] simple n %d fill %lld int %lld M1 %lld M2 %lld M3 %lld M4 %lld "
+                   "M5 %lld M6 %lld M7 %lld M8 %lld phase %lld lead %lld overcap %lld\n",
+                   n, gs_fill, it_int[0] + it_int[1], gs_m[0], gs_m[1], gs_m[2], gs_m[3], gs_m[4],
+                   gs_m[5], gs_m[6], gs_m[7], gs_phase, gs_lead, gs_over);
+      std::fprintf(stderr,
+                   "[grammar] per_nt fill %.3f int %.3f M1 %.3f M2 %.3f M3 %.3f M4 %.3f M5 %.3f "
+                   "M6 %.3f M7 %.3f M8 %.3f phase %.3f lead %.3f\n",
+                   gs_fill / dn, (it_int[0] + it_int[1]) / dn, gs_m[0] / dn, gs_m[1] / dn,
+                   gs_m[2] / dn, gs_m[3] / dn, gs_m[4] / dn, gs_m[5] / dn, gs_m[6] / dn,
+                   gs_m[7] / dn, gs_phase / dn, gs_lead / dn);
+      static const char* tn[6] = {"R^M", "R^M2", "R^Multi", "U^M", "U^M2", "U^Multi"};
+      std::fprintf(stderr, "[grammar-kept] n %d", n);
+      for (int t = 0; t < 6; ++t)
+        std::fprintf(stderr, " %s %.3f", tn[t], gs_tab_kept[t] / dn);
+      std::fprintf(stderr, "\n");
+    }
     if (sw_check && l2r_mode != 0) sw_growth_check();
+    if (!g_eq_path.empty() && l2r_mode != 0) g_eq_write();
     return logZ;
   }
 
@@ -1856,6 +2394,7 @@ class DP03 {
 
   // --stem-est tables from this finished nested-only run (StemEst above).
   void build_stem_est(int L, StemEst& st, bool mirror = false) const {
+    if (!mates_ready) const_cast<DP03*>(this)->lp_build_mates();
     st.n = n;
     st.loop = L;
     st.C0 = C;
@@ -1890,7 +2429,7 @@ class DP03 {
     std::vector<double> T(static_cast<size_t>(n) * n, NEG_INF);
     std::vector<stemidx::Entry> ents;
     for (int x = 0; x < n; ++x)
-      for (int y : partners_right[x]) {
+      for (int y = next_mate(x, x); y >= 0; y = next_mate(x, y)) {
         double acc = E.end_ok(x, y) ? E.at(x, y) + S[y + 1] : NEG_INF;
         for (int x0 = std::max(0, x - 1 - lc); x0 < x; ++x0)
           for (int y0 = y + 1; y0 <= std::min(n - 1, y + 1 + lc); ++y0) {
@@ -1912,7 +2451,7 @@ class DP03 {
     std::vector<stemidx::Entry> ents2;
     for (int x = 0; x < n; ++x) {
       const double pre = x > 0 ? C[x - 1] : 0.0;
-      for (int y : partners_right[x]) {
+      for (int y = next_mate(x, x); y >= 0; y = next_mate(x, y)) {
         double acc = E.end_ok(x, y) ? E.at(x, y) + pre : NEG_INF;
         for (int x0 = std::max(0, x - 1 - lc); x0 < x; ++x0)
           for (int y0 = y + 1; y0 <= std::min(n - 1, y + 1 + lc); ++y0) {
@@ -1935,10 +2474,11 @@ class DP03 {
   // st.beta from this nested-only run (after build_stem_est, which sets st.S): runs the outside
   // pass and keeps the Qb outside value of every pair.
   void build_nested_beta(StemEst& st) {
+    if (!mates_ready) lp_build_mates();
     outside();
     st.beta.assign(static_cast<size_t>(n) * n, NEG_INF);
     for (int x = 0; x < n; ++x)
-      for (int y : partners_right[x]) {
+      for (int y = next_mate(x, x); y >= 0; y = next_mate(x, y)) {
         double b = Qb_b[ix(x, y)];
         if (b < HALF_NEG && E.end_ok(x, y)) b = prefix_log(x) + E.at(x, y) + st.S[y + 1];
         st.beta[ix(x, y)] = b;
@@ -1982,7 +2522,7 @@ class DP03 {
 
   // Closed-value outsides of Qm / Qm2 with dangles (before run_back_at); set before outside().
   bool keep_closed_b = false;
-  std::vector<double> QmC_b, Qm2C_b;
+  SpMat QmC_b, Qm2C_b;
 
   // st's --stem-est-principled data from this nested-only run (chain_qmp set; runs the outside
   // pass): prS, prQz, prMbar, kept pairs (P >= floor), prBml; nested: the outsides of Qb / Qm /
@@ -2026,10 +2566,18 @@ class DP03 {
         S[y] = acc;
       }
     }
-    st.prQz.assign(nn, NEG_INF);
-    for (int i = 0; i < n; ++i)
-      for (int j = i; j < n; ++j) st.prQz[ix(i, j)] = Qz[ix(i, j)];
-    if (!st.skip_qbin) st.prQbIn = Qb;
+    // --qzbar-old: always dense-copy nested Qz into prQz (snap/incperf), even if qz_beam_fill.
+    if (!qz_beam_fill || qzbar_old) {
+      st.prQz.assign(nn, NEG_INF);
+      for (int i = 0; i < n; ++i)
+        for (int j = i; j < n; ++j) st.prQz[ix(i, j)] = Qz[ix(i, j)];
+      if (qzbar_old) {
+        st.qz_on = 0;
+        st.qz_col.clear();
+        st.qz_col.shrink_to_fit();
+      }
+    }
+    if (!st.skip_qbin) st.prQbIn = Qb.dense();
     st.prMbar.assign(nn, NEG_INF);
     if (p2_sweep) {
       st.prMbarAt.assign(n, {});
@@ -2119,9 +2667,9 @@ class DP03 {
     if (g_skip_bml) {
       if (nested) {
         st.pr_nested = true;
-        st.prQb_b = Qb_b;
-        st.prQm_b = dz ? QmC_b : Qm_b;
-        st.prQm2_b = dz ? Qm2C_b : Qm2_b;
+        st.prQb_b = Qb_b.dense();
+        st.prQm_b = dz ? QmC_b.dense() : Qm_b.dense();
+        st.prQm2_b = dz ? Qm2C_b.dense() : Qm2_b.dense();
       }
       pass2_apply(st);
       return;
@@ -2136,7 +2684,7 @@ class DP03 {
         if (i < 0) continue;
         const double mb = Qm_b[ix(i, e)];
         if (mb < HALF_NEG) continue;
-        for (int d = i; d <= e && d - i <= E.ml_left; ++d) {
+        for (int d = i; d <= e && d - i <= E.ml_left && lead_gap_ok(d - i); ++d) {
           double w = w3 * (d - i);
           if (dz) w += E.run(i, d - 1);
           Bab[ix(d, e)] = log_add(Bab[ix(d, e)], mb + w);
@@ -2194,9 +2742,9 @@ class DP03 {
     }
     if (nested) {
       st.pr_nested = true;
-      st.prQb_b = Qb_b;
-      st.prQm_b = dz ? QmC_b : Qm_b;
-      st.prQm2_b = dz ? Qm2C_b : Qm2_b;
+      st.prQb_b = Qb_b.dense();
+      st.prQm_b = dz ? QmC_b.dense() : Qm_b.dense();
+      st.prQm2_b = dz ? Qm2C_b.dense() : Qm2_b.dense();
     }
     if (check && n <= 200) bml_check(st);
     pass2_apply(st);
@@ -2212,19 +2760,46 @@ class DP03 {
   // reverse of the inside: extension from j+1, interior from kept outer pairs, the exterior
   // edge, the Qm/Qm2 branch split over kept states, then the pair pushes into Qm2.
   // Each map is cut before it pushes. Qm and Qm2 maps are freed at the end of j.
+  struct LeadEnt {
+    int x0;
+    double w;
+  };
   void sw_hyper_push(StemEst& st) {
     using Ga = std::unordered_map<uint64_t, double>;
     struct M {
       Ga g, v, b;
       bool empty() const { return g.empty() && v.empty() && b.empty(); }
     };
-    const bool do_g = p2_sweep;
+    const bool do_g = false;
     const bool do_v = p2_vsweep;
     const bool do_b = sw_check && p2_vsweep && p2_v_cap <= 0 && g_ntr_K <= 0;
     const int Kg = g_ntr_K, Kv = p2_v_cap;
     const double a1 = E.w_alpha1, a2 = E.w_alpha2, a3 = E.w_alpha3;
     long long pushes = 0, st_g = 0, st_v = 0;
     int qm_max = 0;
+    struct Hist {
+      std::vector<uint32_t> c;
+      long long n = 0, sum = 0;
+      void add(size_t s) {
+        if (c.size() <= s) c.resize(s + 1);
+        ++c[s];
+        ++n;
+        sum += static_cast<long long>(s);
+      }
+      double mean() const { return n ? static_cast<double>(sum) / static_cast<double>(n) : 0.0; }
+      long long max() const { return n && !c.empty() ? static_cast<long long>(c.size() - 1) : 0; }
+      long long p99() const {
+        if (!n) return 0;
+        long long target = (n * 99 + 99) / 100;
+        if (target < 1) target = 1;
+        long long acc = 0;
+        for (size_t i = 0; i < c.size(); ++i) {
+          acc += c[i];
+          if (acc >= target) return static_cast<long long>(i);
+        }
+        return c.empty() ? 0 : static_cast<long long>(c.size() - 1);
+      }
+    } g_at, v_at, g_pre, v_pre, g_kept, v_kept;
     auto scale_into = [&](M& d, const M& s, double a) {
       if (a < HALF_NEG || s.empty()) return;
       auto one = [&](Ga& dd, const Ga& ss) {
@@ -2242,10 +2817,13 @@ class DP03 {
     };
     auto push_to = [&](M& d, const M& s, double a) {
       if (a < HALF_NEG || s.empty()) return;
+      if (do_g && !s.g.empty()) g_at.add(s.g.size());
+      if (do_v && !s.v.empty()) v_at.add(s.v.size());
       scale_into(d, s, a);
       ++pushes;
     };
     auto cap_ga = [&](Ga& m) {
+      g_pre.add(m.size());
       if (Kg <= 0 || static_cast<int>(m.size()) <= Kg) return;
       struct E {
         uint64_t k;
@@ -2274,6 +2852,7 @@ class DP03 {
       for (const E& e : v) m.emplace(e.k, e.w);
     };
     auto cap_mu = [&](Ga& m) {
+      v_pre.add(m.size());
       if (Kv <= 0 || static_cast<int>(m.size()) <= Kv) return;
       struct E {
         uint64_t k;
@@ -2301,11 +2880,17 @@ class DP03 {
     auto cap_m = [&](M& s) {
       if (do_g && !s.g.empty()) {
         cap_ga(s.g);
-        if (!s.g.empty()) ++st_g;
+        if (!s.g.empty()) {
+          ++st_g;
+          g_kept.add(s.g.size());
+        }
       }
       if (do_v && !s.v.empty()) {
         cap_mu(s.v);
-        if (!s.v.empty()) ++st_v;
+        if (!s.v.empty()) {
+          ++st_v;
+          v_kept.add(s.v.size());
+        }
       }
     };
     auto add1 = [&](Ga& d, uint64_t k, double w) {
@@ -2314,6 +2899,13 @@ class DP03 {
       if (it == d.end()) d.emplace(k, w);
       else it->second = log_add(it->second, w);
     };
+    // A pruned target is not zeroed by the edge coefficient: dQ_s/dQ_c does not contain Q_c.
+    long long hk_map[3] = {}, hk_bad[3] = {}, hk_e[12] = {}, hk_eb[12] = {};
+    auto kept_at = [&](const OMap& at, int i) { return i >= 0 && at.has(i); };
+    auto note_push = [&](int e, bool ok) {
+      ++hk_e[e];
+      if (!ok) ++hk_eb[e];
+    };
     const auto t0 = std::chrono::steady_clock::now();
     std::vector<double> Cb(static_cast<size_t>(n), NEG_INF);
     if (n > 0) Cb[static_cast<size_t>(n - 1)] = 0.0;
@@ -2321,6 +2913,7 @@ class DP03 {
     std::vector<std::unordered_map<int, M>> qm(static_cast<size_t>(n)), qm2(static_cast<size_t>(n));
     std::vector<std::unordered_map<int, M>> u1(static_cast<size_t>(n)), u2(static_cast<size_t>(n));
     std::vector<std::unordered_map<int, M>> u12(static_cast<size_t>(n)), u22(static_cast<size_t>(n));
+    std::vector<std::unordered_map<int, M>> lpm(static_cast<size_t>(n));
     std::unordered_map<uint64_t, M> pairs;
     auto run_mix = [&](M& closed, const M* u1n, const M* u2n, int j, double w, M& ou1, M& ou2) {
       M p = closed;
@@ -2346,13 +2939,14 @@ class DP03 {
       } else if (j + 1 < n) {
         Cb[static_cast<size_t>(j)] = log_add(Cb[static_cast<size_t>(j)], Cb[static_cast<size_t>(j + 1)]);
       }
-      auto extend_col = [&](std::unordered_map<int, M>& col, const OMap& at,
+      auto extend_col = [&](int edge, std::unordered_map<int, M>& col, const OMap& at,
                             std::unordered_map<int, M>& U1, std::unordered_map<int, M>& U2,
                             std::unordered_map<int, M>* U1n, std::unordered_map<int, M>* U2n) {
         std::unordered_map<int, M> nu1, nu2;
         for (size_t r = 0; r < at.slots(); ++r) {
           const int i = at.keys[r];
           if (i < 0) continue;
+          note_push(edge, kept_at(at, i));
           const M* a = nullptr;
           const M* b = nullptr;
           if (U1n) {
@@ -2371,10 +2965,10 @@ class DP03 {
         U2.swap(nu2);
       };
       if (dz) {
-        extend_col(qm[static_cast<size_t>(j)], Qm_at[j], u1[static_cast<size_t>(j)],
+        extend_col(0, qm[static_cast<size_t>(j)], Qm_at[j], u1[static_cast<size_t>(j)],
                    u2[static_cast<size_t>(j)], j + 1 < n ? &u1[static_cast<size_t>(j + 1)] : nullptr,
                    j + 1 < n ? &u2[static_cast<size_t>(j + 1)] : nullptr);
-        extend_col(qm2[static_cast<size_t>(j)], Qm2_at[j], u12[static_cast<size_t>(j)],
+        extend_col(1, qm2[static_cast<size_t>(j)], Qm2_at[j], u12[static_cast<size_t>(j)],
                    u22[static_cast<size_t>(j)], j + 1 < n ? &u12[static_cast<size_t>(j + 1)] : nullptr,
                    j + 1 < n ? &u22[static_cast<size_t>(j + 1)] : nullptr);
       } else if (j + 1 < n) {
@@ -2382,14 +2976,39 @@ class DP03 {
           const int i = Qm_at[j].keys[r];
           if (i < 0) continue;
           auto it = qm[static_cast<size_t>(j + 1)].find(i);
-          if (it != qm[static_cast<size_t>(j + 1)].end()) push_to(qm[static_cast<size_t>(j)][i], it->second, a3);
+          if (it != qm[static_cast<size_t>(j + 1)].end()) {
+            note_push(0, kept_at(Qm_at[j], i));
+            push_to(qm[static_cast<size_t>(j)][i], it->second, a3);
+          }
         }
         for (size_t r = 0; r < Qm2_at[j].slots(); ++r) {
           const int i = Qm2_at[j].keys[r];
           if (i < 0) continue;
           auto it = qm2[static_cast<size_t>(j + 1)].find(i);
-          if (it != qm2[static_cast<size_t>(j + 1)].end())
+          if (it != qm2[static_cast<size_t>(j + 1)].end()) {
+            note_push(1, kept_at(Qm2_at[j], i));
             push_to(qm2[static_cast<size_t>(j)][i], it->second, a3);
+          }
+        }
+      }
+      if (l2r_mode == 0 && !lpP.empty() && !lpM.empty()) {
+        const int L = lead_span();
+        const OMap& src = lpP[static_cast<size_t>(j)];
+        for (size_t s = 0; s < src.slots(); ++s) {
+          const int ib = src.keys[s];
+          if (ib < 0 || !Qm2_at[j].has(ib)) continue;
+          const int p_lo = std::max(0, ib - L);
+          for (int p = ib - 1; p >= p_lo; --p) {
+            const int q = next_mate(p, j);
+            if (q < 0 || q >= n) continue;
+            const int k = p * 3 + lp_kind(q - j - 1);
+            if (!lpM[static_cast<size_t>(q)].has(k)) continue;
+            auto it = lpm[static_cast<size_t>(q)].find(k);
+            if (it == lpm[static_cast<size_t>(q)].end() || it->second.empty()) continue;
+            const double factor = unpaired_gap(p + 1, ib - 1) + unpaired_gap(j + 1, q - 1);
+            note_push(10, true);
+            push_to(qm2[static_cast<size_t>(j)][ib], it->second, factor);
+          }
         }
       }
       const int qhi = std::min(n, j + 2 + cap);
@@ -2397,6 +3016,22 @@ class DP03 {
         const int d = Qb_at[j].keys[r];
         if (d < 0) continue;
         M& inner = pairs[key2(d, j)];
+        if (l2r_mode == 0) {
+          const int p_lo = std::max(0, d - 1 - cap);
+          for (int p = d - 1; p >= p_lo; --p) {
+            const int budget = cap - (d - p - 1);
+            if (budget < 0) break;
+            for (int q = next_mate(p, j); q != -1 && q - j - 1 <= budget; q = next_mate(p, q)) {
+              if (!Qb_at[q].has(p)) continue;
+              const double w = E.interior(p, d, j, q);
+              if (w < HALF_NEG) continue;
+              auto it = pairs.find(key2(p, q));
+              note_push(2, it != pairs.end());
+              if (it != pairs.end()) push_to(inner, it->second, w);
+            }
+          }
+          continue;
+        }
         for (int q = j + 1; q < qhi; ++q) {
           for (size_t s = 0; s < Qb_at[q].slots(); ++s) {
             const int i = Qb_at[q].keys[s];
@@ -2405,13 +3040,17 @@ class DP03 {
             const double w = E.interior(i, d, j, q);
             if (w < HALF_NEG) continue;
             auto it = pairs.find(key2(i, q));
-            if (it != pairs.end()) push_to(inner, it->second, w);
+            if (it != pairs.end()) {
+              note_push(2, kept_at(Qb_at[j], d) && kept_at(Qb_at[q], i));
+              push_to(inner, it->second, w);
+            }
           }
         }
       }
       for (size_t r = 0; r < Qb_at[j].slots(); ++r) {
         const int i = Qb_at[j].keys[r];
         if (i < 0 || !E.end_ok(i, j)) continue;
+        note_push(3, kept_at(Qb_at[j], i));
         const double at = E.at(i, j);
         const double cb = Cb[static_cast<size_t>(j)];
         if (do_b && cb > HALF_NEG && at > HALF_NEG) add1(pairs[key2(i, j)].b, key2(i, 0), cb + at);
@@ -2432,11 +3071,27 @@ class DP03 {
         M& dst = pairs[key2(d, j)];
         for (size_t s = 0; s < Qm_at[j].slots(); ++s) {
           const int i = Qm_at[j].keys[s];
-          if (i < 0 || i > d || d - i > E.ml_left) continue;
-          double w = w2 + a3 * (d - i);
-          if (dz && i <= d - 1) w += E.run(i, d - 1);
+          if (i < 0 || i > d || d - i > E.ml_left || !lead_gap_ok(d - i)) continue;
+          const LeadEnt* lead = nullptr;
+          if (l2r_mode != 0 && d < static_cast<int>(qlead.size())) {
+            const auto& col = qlead[static_cast<size_t>(d)];
+            auto it = std::lower_bound(col.begin(), col.end(), i,
+                                       [](const LeadEnt& e, int x) { return e.x0 < x; });
+            if (it != col.end() && it->x0 == i) lead = &*it;
+          }
+          // Pass 1's M = P has no left unpaired run; the fragment starts on the pair.
+          // --pk-l2r off is the DP03 reference and keeps the leading-run window.
+          if (l2r_mode == 0 && !allow_pk) {
+            if (i != d) continue;
+          } else if (!lead) {
+            continue;
+          }
+          const double w = (l2r_mode == 0 && !allow_pk) ? w2 : w2 + lead->w;
           auto it = qm[static_cast<size_t>(j)].find(i);
-          if (it != qm[static_cast<size_t>(j)].end()) push_to(dst, it->second, w);
+          if (it != qm[static_cast<size_t>(j)].end()) {
+            note_push(4, kept_at(Qb_at[j], d) && kept_at(Qm_at[j], i));
+            push_to(dst, it->second, w);
+          }
         }
         if (d == 0) continue;
         for (size_t s = 0; s < Qm_at[d - 1].slots(); ++s) {
@@ -2447,12 +3102,20 @@ class DP03 {
           auto it = qm[static_cast<size_t>(j)].find(i);
           auto it2 = qm2[static_cast<size_t>(j)].find(i);
           if (it != qm[static_cast<size_t>(j)].end()) {
+            note_push(5, kept_at(Qb_at[j], d) && kept_at(Qm_at[j], i) && kept_at(Qm_at[d - 1], i));
             push_to(dst, it->second, qm_in + w2);
-            if (obj > HALF_NEG) push_to(qm[static_cast<size_t>(d - 1)][i], it->second, obj + w2);
+            if (obj > HALF_NEG) {
+              note_push(6, kept_at(Qm_at[d - 1], i) && kept_at(Qm_at[j], i));
+              push_to(qm[static_cast<size_t>(d - 1)][i], it->second, obj + w2);
+            }
           }
           if (it2 != qm2[static_cast<size_t>(j)].end()) {
+            note_push(7, kept_at(Qb_at[j], d) && kept_at(Qm2_at[j], i) && kept_at(Qm_at[d - 1], i));
             push_to(dst, it2->second, qm_in + w2);
-            if (obj > HALF_NEG) push_to(qm[static_cast<size_t>(d - 1)][i], it2->second, obj + w2);
+            if (obj > HALF_NEG) {
+              note_push(8, kept_at(Qm_at[d - 1], i) && kept_at(Qm2_at[j], i));
+              push_to(qm[static_cast<size_t>(d - 1)][i], it2->second, obj + w2);
+            }
           }
         }
       }
@@ -2465,26 +3128,65 @@ class DP03 {
           if (do_g) add1(m.g, key2(i, j), E.at(i, j));
           if (do_v) {
             const double sb = st.prS[static_cast<size_t>(j + 1)];
-            if (sb > HALF_NEG) add1(m.v, key2(i, 0), (E.at(i, j) + E.w_beta1) + sb);
+            if (sb > HALF_NEG) add1(m.v, key2(i, 0), E.at(i, j) + sb);
           }
         }
         cap_m(m);
-        if (E.end_ok(i, j) && i + 1 <= j - 1 && Qm2_at[j - 1].has(i + 1))
+        if (l2r_mode != 0 && E.end_ok(i, j) && i + 1 <= j - 1 && Qm2_at[j - 1].has(i + 1)) {
+          note_push(9, kept_at(Qb_at[j], i) && kept_at(Qm2_at[j - 1], i + 1));
           push_to(qm2[static_cast<size_t>(j - 1)][i + 1], m, w_ml + E.at_close(i, j));
+        }
       }
-      qm[static_cast<size_t>(j)].clear();
-      qm2[static_cast<size_t>(j)].clear();
+      if (l2r_mode == 0 && !lpM.empty()) {
+        const OMap& col = lpM[static_cast<size_t>(j)];
+        for (size_t r = 0; r < col.slots(); ++r) {
+          const int k = col.keys[r];
+          if (k < 0) continue;
+          const int p = k / 3;
+          const int kind = k % 3;
+          M& mu = lpm[static_cast<size_t>(j)][k];
+          if (Qb_at[j].has(p) && E.end_ok(p, j)) {
+            auto it = pairs.find(key2(p, j));
+            if (it != pairs.end() && !it->second.empty()) {
+              note_push(9, true);
+              push_to(mu, it->second, E.w_alpha1 + E.w_alpha2 + E.at_close(p, j));
+            }
+          }
+          int qn, nk;
+          double delta;
+          if (!lp_step(p, j, kind, qn, nk, delta)) continue;
+          const int kn = p * 3 + nk;
+          if (qn < 0 || qn >= n || !lpM[static_cast<size_t>(qn)].has(kn)) continue;
+          auto it = lpm[static_cast<size_t>(qn)].find(kn);
+          if (it == lpm[static_cast<size_t>(qn)].end() || it->second.empty()) continue;
+          note_push(11, true);
+          push_to(mu, it->second, delta);
+        }
+      }
+      auto tally = [&](const std::unordered_map<int, M>& col, const OMap& at, int slot) {
+        for (const auto& kv : col) {
+          ++hk_map[slot];
+          if (!at.has(kv.first)) ++hk_bad[slot];
+        }
+      };
+      tally(qm[static_cast<size_t>(j)], Qm_at[j], 0);
+      tally(qm2[static_cast<size_t>(j)], Qm2_at[j], 1);
+      std::unordered_map<int, M>().swap(qm[static_cast<size_t>(j)]);
+      std::unordered_map<int, M>().swap(qm2[static_cast<size_t>(j)]);
       if (j + 1 < n) {
-        u1[static_cast<size_t>(j + 1)].clear();
-        u2[static_cast<size_t>(j + 1)].clear();
-        u12[static_cast<size_t>(j + 1)].clear();
-        u22[static_cast<size_t>(j + 1)].clear();
+        std::unordered_map<int, M>().swap(u1[static_cast<size_t>(j + 1)]);
+        std::unordered_map<int, M>().swap(u2[static_cast<size_t>(j + 1)]);
+        std::unordered_map<int, M>().swap(u12[static_cast<size_t>(j + 1)]);
+        std::unordered_map<int, M>().swap(u22[static_cast<size_t>(j + 1)]);
       }
     }
     st.prGamma.clear();
     st.prMu.clear();
     st.prMuFloor.clear();
     for (auto& [k, m] : pairs) {
+      const int px = k_hi(k), py = k_lo(k);
+      ++hk_map[2];
+      if (py < 0 || py >= n || !Qb_at[py].has(px)) ++hk_bad[2];
       if (do_g && !m.g.empty()) st.prGamma.emplace(k, std::move(m.g));
       if (do_v && !m.v.empty()) {
         double mn = NEG_INF;
@@ -2500,13 +3202,105 @@ class DP03 {
         st.prMu.emplace(k, std::move(m.v));
       }
     }
+    if (!g_mu_dump.empty()) {
+      std::ofstream md(g_mu_dump);
+      for (const auto& [k, mv] : st.prMu) {
+        const int x = k_hi(k), y = k_lo(k);
+        for (const auto& [bk, w] : mv) {
+          if (!(w > HALF_NEG)) continue;
+          md << "V " << x << " " << y << " " << k_hi(bk) << " " << w << "\n";
+        }
+      }
+      for (const auto& [k, mg] : st.prGamma) {
+        const int x = k_hi(k), y = k_lo(k);
+        std::unordered_map<int, double> byq;
+        for (const auto& [bk, w] : mg) {
+          if (!(w > HALF_NEG)) continue;
+          const int p = k_hi(bk), q = k_lo(bk);
+          md << "G " << x << " " << y << " " << p << " " << q << " " << w << "\n";
+          const double g = w + prefix_log(p);
+          auto it = byq.find(q);
+          if (it == byq.end()) byq.emplace(q, g);
+          else it->second = log_add(it->second, g);
+        }
+        for (const auto& [q, g] : byq) md << "Q " << x << " " << y << " " << q << " " << g << "\n";
+      }
+    }
     st.pr_sw_states_g = st_g;
     st.pr_sw_states_v = st_v;
     st.pr_sw_pushes = pushes;
     st.pr_mbar_max = std::max(st.pr_mbar_max, qm_max);
     st.pr_sw_sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    std::fprintf(stderr,
+                 "[sweep-kept] maps qm %lld bad %lld qm2 %lld bad %lld pair %lld bad %lld\n",
+                 hk_map[0], hk_bad[0], hk_map[1], hk_bad[1], hk_map[2], hk_bad[2]);
+    static const char* ename[12] = {"E1 qm-ext", "E2 qm2-ext", "E3 interior", "E4 exterior",
+                                    "E5 branch1", "E6 branch-qm-pair", "E7 branch-qm-tail",
+                                    "E8 branch-qm2-pair", "E8 branch-qm2-tail", "E9 close",
+                                    "E3 multi", "E4 multi-ext"};
+    for (int e = 0; e < 12; ++e)
+      std::fprintf(stderr, "[sweep-kept] %s push %lld bad %lld\n", ename[e], hk_e[e], hk_eb[e]);
+    if (do_v && p2_v_cap <= 0 && g_ntr_K <= 0 && !Qb_b.empty()) {
+      auto rel = [](double a, double b) {
+        if (a < HALF_NEG && b < HALF_NEG) return 0.0;
+        if (a < HALF_NEG || b < HALF_NEG) return 1e300;
+        return std::fabs(std::expm1(a - b));
+      };
+      double worst = 0, dmin = 1e300, dmax = -1e300, wgot = 0, wref = 0;
+      int wx = -1, wy = -1, wn = 0;
+      long long nent = 0, nbad = 0;
+      for (int j = 0; j < n; ++j) {
+        for (size_t r = 0; r < Qb_at[j].slots(); ++r) {
+          const int i = Qb_at[j].keys[r];
+          if (i < 0 || !E.end_ok(i, j)) continue;
+          const double ref = Qb_b[ix(i, j)];
+          double got = NEG_INF;
+          int nk = 0;
+          auto it = st.prMu.find(key2(i, j));
+          if (it != st.prMu.end()) {
+            for (const auto& [bk, w] : it->second) {
+              if (w < HALF_NEG) continue;
+              ++nk;
+              const int b = k_hi(bk);
+              const double c = b > 0 ? C[static_cast<size_t>(b - 1)] : 0.0;
+              got = log_add(got, c + w);
+            }
+          }
+          if (got < HALF_NEG && ref < HALF_NEG) continue;
+          ++nent;
+          const double d = rel(got, ref);
+          const double dl = (got > HALF_NEG && ref > HALF_NEG) ? got - ref : 1e300;
+          if (dl < dmin) dmin = dl;
+          if (dl > dmax) dmax = dl;
+          if (d > 1e-9) ++nbad;
+          if (d > worst) {
+            worst = d;
+            wx = i;
+            wy = j;
+            wgot = got;
+            wref = ref;
+            wn = nk;
+          }
+        }
+      }
+      std::fprintf(stderr,
+                   "[v-out] pairs %lld bad %lld max_rel %.3e at %d.%d got %.6f ref %.6f dlog %.6f "
+                   "keys %d dlog_min %.6f dlog_max %.6f\n",
+                   nent, nbad, worst, wx, wy, wgot, wref, wgot - wref, wn, dmin, dmax);
+    }
     std::fprintf(stderr, "[sweep-h] g_states %lld v_states %lld pushes %lld qm_max %d sec %.3f\n",
                  st_g, st_v, pushes, qm_max, st.pr_sw_sec);
+    std::fprintf(stderr,
+                 "[map] v_maps %lld v_mean %.4f v_max %lld g_maps %lld g_mean %.4f g_max %lld "
+                 "pushes %lld\n",
+                 v_kept.n, v_kept.mean(), v_kept.max(), g_kept.n, g_kept.mean(), g_kept.max(),
+                 pushes);
+    const double usec = pushes > 0 ? st.pr_sw_sec * 1e6 / static_cast<double>(pushes) : 0.0;
+    std::fprintf(stderr,
+                 "[sweep-push] g_n %lld g_mean %.3f g_p99 %lld g_pre_mean %.3f "
+                 "v_n %lld v_mean %.3f v_p99 %lld v_pre_mean %.3f usec %.4f\n",
+                 g_at.n, g_at.mean(), g_at.p99(), g_pre.mean(), v_at.n, v_at.mean(), v_at.p99(),
+                 v_pre.mean(), usec);
     if (do_b && !Qb_b.empty()) {
       auto rel = [](double a, double b) {
         if (a < HALF_NEG && b < HALF_NEG) return 0.0;
@@ -2547,7 +3341,7 @@ class DP03 {
 
   void pass2_apply(StemEst& st) {
     if (p2_v_cap > 0 || p2_g_eager || p2_qz_beam > 0 || p2_sweep || p2_vsweep) st.prC = C;
-    if (sw_check && !Qb_b.empty()) st.prQb_b = Qb_b;
+    if (sw_check && !Qb_b.empty()) st.prQb_b = Qb_b.dense();
     if (p2_sweep || p2_vsweep) sw_hyper_push(st);
     if (p2_qz_beam <= 0 && p2_v_mode == 0 && p2_g_mode == 0) return;
     if (st.prC.empty()) st.prC = C;
@@ -2587,6 +3381,13 @@ class DP03 {
         take(p2_g_mode, p2_g_bp, st.prKeptRightG);
     }
     if (p2_qz_beam <= 0) return;
+    // --qzbar-old: keep dense prQz from build_principled; do not replace with beamed qz_col.
+    if (qzbar_old) {
+      st.qz_on = 0;
+      st.qz_col.clear();
+      st.qz_col.shrink_to_fit();
+      return;
+    }
     if (qz_beam_fill && p2_qz_key != 2 && !qz_keep.empty()) {
       st.qz_col.assign(static_cast<size_t>(n), {});
       st.p2_qz_n = 0;
@@ -2694,6 +3495,17 @@ class DP03 {
         }
         cs.push_back({k, q, dz ? a.acc : 0.0, a.u1, a.u2, key});
       }
+      if (g_beam_stats.f) {
+        std::vector<double> keys;
+        keys.reserve(cs.size());
+        for (const Cand& c : cs) keys.push_back(c.key);
+        std::sort(keys.begin(), keys.end(), [](double a, double b) { return a > b; });
+        const size_t kept_n =
+            static_cast<int>(cs.size()) > p2_qz_beam ? static_cast<size_t>(p2_qz_beam) : keys.size();
+        const int full = static_cast<int>(cs.size()) > p2_qz_beam ? 1 : 0;
+        g_beam_stats.log_prune("Qz_pre", l, keys.size(), kept_n, BeamStats::mass_share(keys, kept_n),
+                               full);
+      }
       if (static_cast<int>(cs.size()) > p2_qz_beam) {
         std::nth_element(cs.begin(), cs.begin() + p2_qz_beam, cs.end(),
                          [](const Cand& a, const Cand& b) { return a.key > b.key; });
@@ -2718,6 +3530,7 @@ class DP03 {
       for (int e = d; e < n; ++e) {
         std::vector<long double> t;
         for (int i = std::max(0, d - std::min(E.ml_left, n)); i <= d; ++i) {
+          if (!lead_gap_ok(d - i)) continue;
           if (!Qm_at[e].has(i) || Qm_b[ix(i, e)] < HALF_NEG) continue;
           long double w = Qm_b[ix(i, e)] + E.ml_pk_k * w2 + w3 * (d - i);
           if (dz) w += E.run(i, d - 1);
@@ -2858,6 +3671,7 @@ class DP03 {
   // (--stem-est-qg-r partner): Qg's stem-2 score from the partner tables (stem_Bg) instead of
   // the mirrored index.  consistent (--stem-est-consts consistent): every role adds beta1, the
   // closing at(p, q) and only the stem terms not yet in alpha (StemEval).
+  void set_loop_cap(int lc) { cap = lc; }
   void set_stem(const StemEst* st, bool both, bool qg2 = false, bool qg_partner = false,
                 bool consistent = false) {
     stem_ = st;
@@ -3075,16 +3889,44 @@ class DP03 {
   // Pass 2 limits. All default off: 0 leaves the current tables and ranking keys.
   int p2_qz_beam = 0, p2_qz_key = 1, p2_v_mode = 0, p2_v_bp = 0, p2_v_cap = 0, p2_v_trim = 0;
   int p2_g_mode = 0, p2_g_bp = 0, p2_g_cap = 0;
-  bool sw_check = false, p2_sweep = false, p2_vsweep = false, p2_v_floor = false;
+  bool sw_check = false, p2_sweep = false, p2_vsweep = false, geq_pre = false;
+  int p2_v_floor = 0;  // 0 off, 1 smallest kept mu, 2 log-weight 0
+  bool p2_v_cut_fb = false;  // --v-cut-fb: kind-(i) miss = kappa_min / C_pre(b-1)
+  bool lazy_ml_cap = false;  // --lazy-ml-cap: lazy leading run uses ml_lead_cap
   bool p2_g_suffix = false, p2_g_eager = false, p2_g_fb = false;
   // --pre-key inside: beam rank is the inside weight. Default is C(i-1) + inside.
   bool pre_key_inside = false;
   // --qz-beam on the nested pre-pass: fill Q^z_pre beamed instead of the dense table.
   // The scan's own Q^z (part of Z) is never beamed.
-  bool qz_beam_fill = false, prof_on = false;
+  bool qz_beam_fill = false, qzbar_old = false, prof_on = false;
+  long long qz_cand = 0, qz_kept = 0;
+  // Pass-1 rule iterations (per nested pfunc). Printed as [p1rule] per nucleotide.
+  long long r_hair = 0, r_int = 0, r_m2xp = 0, r_m2multi = 0, r_muext = 0, r_mmu = 0, r_mp = 0,
+            r_extc = 0;
+  double sec_qb = 0, sec_qm = 0, sec_branch = 0, sec_qz = 0, sec_c = 0;
+  double sec_hair = 0, sec_int = 0, sec_m2xp = 0, sec_emit = 0, sec_mclose = 0, sec_mp = 0;
   double prof_qz_sec = 0.0;
   int prof_region = 0;             // 0 other, 1 R prune, 2 spawn rank, 3 H / P3
   double prof_grow_reg[4] = {};
+  double sx_k_sec = 0, sx_rkey_sec = 0;
+  long long sx_k_n = 0, sx_m_sum = 0;
+  // 0 other, 1 R root (rec_root), 2 R key (rec_key), 3 spawn rank
+  int sx_ksrc = 0;
+  long long sx_k_src[4] = {};
+  long long sx_rkey_n = 0;
+  long long sx_m_h[8] = {};
+  // query-weighted length of the node-trunc list that the K call walks (no layer m on that path)
+  long long sx_list_h[65] = {};
+  // --k-memo: lK(arm, q') = arm_phi, a function of the pass-2 arm tables only
+  bool k_memo = false;
+  std::unordered_map<uint64_t, double> lKm;
+  long long lKm_calls = 0, lKm_hits = 0;
+  // --k-bound: compare lK against the exact gap sum once, after the arms exist.
+  // --k-exact-ub: R beams rank by the exact gap sum, in upper-bound order, and stop early.
+  bool k_bound = false, k_exact_ub = false, k_exact_check = false, sx_k_exact = false;
+  std::unordered_map<uint64_t, double> lKxM;
+  long long lKx_calls = 0, lKx_hits = 0, sx_kx_sigma = 0, k_exact_cols = 0, k_exact_mis = 0;
+  double sx_kx_sec = 0.0;
   long long prof_help_steps = 0;
   struct QkEnt {
     int k;
@@ -3346,19 +4188,73 @@ class DP03 {
   bool outside_done = false;
   double logZ = NEG_INF;
 
-  std::vector<double> Qb, Qm, Qm2, Qz, Qp, C;
+  AtView Qb, Qm, Qm2, Qp;
+  SpMat Qz;
+  std::vector<double> C;
   std::vector<OMap> Qb_at, Qm_at, Qm2_at, Qp_at;
   // Qmp: Qm with the stem-multiloop penalties b_p, c_p; qmp_at() / qmp_b() fall back to
   // Qm unless E.stem_ml
-  std::vector<double> Qmp, Qmp_b;
+  AtView Qmp;
+  SpMat Qmp_b;
   std::vector<OMap> Qmp_at;
   const OMap& qmp_at(int j) const { return E.stem_ml ? Qmp_at[j] : Qm_at[j]; }
-  std::vector<double>& qmp_b() { return E.stem_ml ? Qmp_b : Qm_b; }
+  SpMat& qmp_b() { return E.stem_ml ? Qmp_b : Qm_b; }
+  // Per column, Qm slot indices bucketed by the base at key-1 (the left end of a case-(h) pair).
+  mutable std::vector<std::array<std::vector<int>, 4>> qm_bkt;
+  mutable std::vector<char> qm_bkt_ok;
+  void qm_reindex(int j) {
+    if (static_cast<int>(qm_bkt.size()) != n) {
+      qm_bkt.assign(n, {});
+      qm_bkt_ok.assign(n, 0);
+    }
+    auto& b = qm_bkt[j];
+    for (auto& v : b) v.clear();
+    const OMap& at = qmp_at(j);
+    for (size_t r = 0; r < at.slots(); ++r) {
+      const int i = at.keys[r];
+      if (i < 1) continue;
+      const int base = E.code[i - 1];
+      if (base < 0 || base > 3) continue;
+      b[base].push_back(static_cast<int>(r));
+    }
+    qm_bkt_ok[j] = 1;
+  }
+  // Slots of Qm at `col` whose base at key-1 can pair with the base at `right`.
+  // Falls back to every slot when the column has not been bucketed.
+  template <class F>
+  void qm_pair_slots(int col, int right, F&& fn) const {
+    const OMap& at = qmp_at(col);
+    if (static_cast<int>(qm_bkt_ok.size()) == n && qm_bkt_ok[col]) {
+      const int bj = E.code[right];
+      for (int bi = 0; bi < 4; ++bi) {
+        const int t = pair_type(bi, bj);
+        if (t < 0 || (!allow_gu && (t == 3 || t == 5))) continue;
+        for (int r : qm_bkt[col][bi]) fn(r);
+      }
+      return;
+    }
+    for (size_t r = 0; r < at.slots(); ++r) fn(static_cast<int>(r));
+  }
   std::vector<OMap> PKM_at;  // PKM_at[j][d] = sum_{e<=j} Qp[d][e] e^{-α3 (j-e)}, beamed
   std::vector<Tab4> Qg, Qgls, Qgrs, Qgl, Qgr;
   std::vector<std::vector<int>> partners_left, partners_right;
+  std::vector<double> qb_acc;  // fill_Qb scratch, one row, reset on the partners just written
+  std::vector<std::vector<LeadEnt>> qlead;
+  // Pass 1 (l2r_mode == 0) enumerates like LinearPartition, via mate_next only.
+  // Interior loops use the energy cap. The multiloop leading run uses ml_lead_cap.
+  // Multi key is (p, q, kind): 0 empty right run, 1 one base, 2 length >= 2.
+  // A length >= 2 extension does not depend on where the run started, so those
+  // arrivals merge. Empty and one-base runs do: the dangle is s1w of that base.
+  std::vector<int> mate_after[4];
+  bool mates_ready = false;
+  std::vector<OMap> lpH;   // hairpin, column = right end, key = left end
+  std::vector<OMap> lpM;   // Multi inside, key = p * 3 + kind
+  std::vector<OMap> lpMb;  // Multi outside
+  std::vector<OMap> lpP;   // M2 weight that ends on a branch, no trailing run
 
-  std::vector<double> Qb_b, Qm_b, Qm2_b, Qz_b, Qp_b, C_b, PKM_b;
+  SpMat Qb_b, Qm_b, Qm2_b, Qp_b, PKM_b;
+  SpMat Qz_b;
+  std::vector<double> C_b;
 
   // Dangles: trailing-run states (P, U1, U2) of the tables that grow by unpaired
   // bases, indexed by column parity; the stored table value closes the run for a
@@ -3397,7 +4293,7 @@ class DP03 {
   }
 
   // Closed values at j into at (and tbl unless null); keys first, then new keys of P.
-  void run_fin(std::vector<double>* tbl, OMap& at, const RunSt& c, const std::vector<int>& first,
+  void run_fin(AtView* tbl, OMap& at, const RunSt& c, const std::vector<int>& first,
                int j) {
     const double s1 = E.s1w[j], d3 = E.d3w[j];
     auto one = [&](int i) {
@@ -3421,8 +4317,8 @@ class DP03 {
 
   // Replaces the outside of the closed values at j by that of P; keeps U1's, U2's.
   // rs >= 0 (keep_runs): also the cell's posterior log weight into runW[rs].
-  void run_back_at(std::vector<double>& beta, const OMap& at, int j, double w, RunSt* rb,
-                   int rs = -1) {
+  template <class Beta>
+  void run_back_at(Beta& beta, const OMap& at, int j, double w, RunSt* rb, int rs = -1) {
     const RunSt& nx = rb[(j + 1) & 1];
     RunSt& cu = rb[j & 1];
     cu.clear();
@@ -3430,7 +4326,7 @@ class DP03 {
       int i = at.keys[r];
       if (i < 0) continue;
       double bP, b1, b2;
-      run_back(beta[ix(i, j)], nx.U1.get(i), nx.U2.get(i), j, w, bP, b1, b2);
+      run_back(static_cast<double>(beta[ix(i, j)]), nx.U1.get(i), nx.U2.get(i), j, w, bP, b1, b2);
       beta[ix(i, j)] = bP;
       cu.U1.put(i, b1);
       cu.U2.put(i, b2);
@@ -3468,11 +4364,7 @@ class DP03 {
 
   void alloc() {
     size_t nn = static_cast<size_t>(n) * n;
-    Qb.assign(nn, NEG_INF);
-    Qm.assign(nn, NEG_INF);
-    Qm2.assign(nn, NEG_INF);
-    Qz.assign(nn, NEG_INF);
-    Qp.assign(nn, NEG_INF);
+    Qz.init(n);
     C.assign(n, NEG_INF);
     auto init_maps = [&](std::vector<OMap>& v) {
       v.resize(n);
@@ -3483,9 +4375,13 @@ class DP03 {
     init_maps(Qm2_at);
     init_maps(Qp_at);
     init_maps(PKM_at);
+    Qb.bind(&Qb_at, n);
+    Qm.bind(&Qm_at, n);
+    Qm2.bind(&Qm2_at, n);
+    Qp.bind(&Qp_at, n);
     if (E.stem_ml) {
-      Qmp.assign(nn, NEG_INF);
       init_maps(Qmp_at);
+      Qmp.bind(&Qmp_at, n);
     }
     dz = E.dangle;
     if (dz) {
@@ -3523,15 +4419,18 @@ class DP03 {
           partners_right[i].push_back(j);
         }
   }
+  // Pass 1 does not build this list. The scan and the stem index do, on first use.
+  void ensure_pairs() const {
+    if (n <= 0 || !partners_left.empty()) return;
+    const_cast<DP03*>(this)->build_pairs();
+  }
 
   // ---------------------------------------------------------------- scores
   double qz_log(int left, int right) const {
     if (left > right) return 0.0;
     if (left < 0 || right >= n) return NEG_INF;
-    if (qz_audit) {
-      ++qz_reads;
-      if (right > l2r_done[LT_QZ]) ++qz_unf;
-    }
+    ++qz_reads;
+    if (qz_audit && right > l2r_done[LT_QZ]) ++qz_unf;
     return Qz[ix(left, right)];
   }
 
@@ -4146,7 +5045,7 @@ class DP03 {
     out.clear();
     const int j = q + 1;
     if (j > n - 1) return;
-    for (int i = std::max(0, c - 1 - cap); i < c; ++i) {
+    for (int i = lead_i_lo(c); i < c; ++i) {
       if (!E.pairs(i, j) || !E.end_ok(i, j)) continue;
       double w = E.w_ap + E.w_bp + E.w_cp * (c - i - 1) + E.at(i, j) + pair_bonus;
       if (dz) w += E.run(i + 1, c - 1);
@@ -4155,8 +5054,9 @@ class DP03 {
     if (c - 1 < 0) return;
     const OMap& at = qmp_at(c - 1);
     std::vector<std::pair<int, double>> qm;
-    for (size_t r = 0; r < at.slots(); ++r)
+    qm_pair_slots(c - 1, j, [&](int r) {
       if (at.keys[r] >= 0) qm.emplace_back(at.keys[r], at.vals[r]);
+    });
     std::sort(qm.begin(), qm.end());
     for (const auto& [i, val] : qm) {
       const int outer = i - 1;
@@ -4381,7 +5281,7 @@ class DP03 {
         out.push_back({xo, yo, 1, w + close(xo, yo)});
       }
     }
-    for (int xo = std::max(0, x - 1 - cap); xo < x; ++xo) {
+    for (int xo = ml_run_lo(x); xo < x; ++xo) {
       double rl = E.w_cp * (x - xo - 1);
       if (dz) rl += E.run(xo + 1, x - 1);
       const std::vector<int>& kr = st.kept_right[xo];
@@ -4629,6 +5529,7 @@ class DP03 {
   std::vector<std::pair<int, int>> sw_pairs;
   // --sweep: gamma of each pair, without the prefix. 0 = full right gap, 1 = gap <= loop cap.
   std::unordered_map<uint64_t, std::unordered_map<uint64_t, double>> sw_ga[2];
+  bool sw_filled = false;
   static double pbytes(const PProf& p) {
     return 8.0 * static_cast<double>(p.k.capacity() + p.w.capacity() + p.lin.capacity()) +
            static_cast<double>(sizeof(PProf) + 24);
@@ -4871,7 +5772,7 @@ class DP03 {
         out.push_back({xo, yo, 1, w + close(xo, yo)});
       }
     }
-    for (int xo = std::max(0, x - 1 - cap); xo < x; ++xo) {
+    for (int xo = ml_run_lo(x); xo < x; ++xo) {
       double rl = E.w_cp * (x - xo - 1);
       if (dz) rl += E.run(xo + 1, x - 1);
       const std::vector<int>& kr = KR[xo];
@@ -4932,7 +5833,7 @@ class DP03 {
         }
       }
     }
-    for (int xo = std::max(0, x - 1 - cap); xo < x; ++xo) {
+    for (int xo = ml_run_lo(x); xo < x; ++xo) {
       double rl = E.w_cp * (x - xo - 1);
       if (dz) rl += E.run(xo + 1, x - 1);
       s.lr.emplace_back(xo, rl);
@@ -5673,6 +6574,8 @@ class DP03 {
                                {"V_untrimmed", v_before, 0.0},
                                {"V_trimmed", v_after, 0.0}});
         }
+        vquery_dump(V);
+        mu_dump_lazy(V);
         if (g_rfv) rfv_keep(V);
         return;
       }
@@ -5704,6 +6607,7 @@ class DP03 {
                    {"V_trimmed", v_after, 0.0}});
         }
       }
+      vquery_dump(V);
       if (g_rfv) rfv_keep(V);
       return;
     }
@@ -5824,6 +6728,62 @@ class DP03 {
   std::vector<int> rfvT;
   long long rfv_look = 0, rfv_miss = 0, rfv_seed = 0, rfv_od = 0, rfv_od_ent = 0,
             rfv_child_miss = 0, rfv_keys = 0, rfv_key_ent = 0;
+  double rfv_sec = 0;
+  // v-sweep lookups split by U keys (rfv_key) and R/K terms (rfv_root). key0 is a state
+  // scored in a column over its beam whose key is -inf because the V read missed.
+  long long rfv_look_u = 0, rfv_miss_u = 0, rfv_look_r = 0, rfv_miss_r = 0;
+  long long rfv_key0_u = 0, rfv_part_u = 0, rfv_key0_r = 0;
+  long long rfv_look_s = 0, rfv_miss_s = 0, vfb_n = 0;
+  // Miss kind: (i) map full (b_V), entry cut; (ii) map exists, not full; (iii) no map.
+  enum { ST_P1 = 0, ST_P2, ST_P3, ST_R, ST_S, ST_U, ST_N };
+  long long vm_i[ST_N] = {}, vm_ii[ST_N] = {}, vm_iii[ST_N] = {};
+  long long km_i[ST_N] = {}, km_ii[ST_N] = {}, km_iii[ST_N] = {};
+  long long hm_i[ST_N] = {}, hm_ii[ST_N] = {}, hm_iii[ST_N] = {};
+  int v_map_kind(int x, int y, int xs) const {
+    if (!stem_) return 3;
+    auto it = stem_->prMu.find(key2(x, y));
+    if (it == stem_->prMu.end()) return 3;
+    auto jt = it->second.find(key2(xs, 0));
+    if (jt != it->second.end() && jt->second > HALF_NEG) return 0;
+    if (p2_v_cap > 0 && static_cast<int>(it->second.size()) >= p2_v_cap) return 1;
+    return 2;
+  }
+  double v_cut_fb_mu(int x, int y, int xs) const {
+    if (!stem_) return NEG_INF;
+    auto ft = stem_->prMuFloor.find(key2(x, y));
+    if (ft == stem_->prMuFloor.end()) return NEG_INF;
+    const double c = (xs > 0 && !stem_->prC.empty()) ? stem_->prC[static_cast<size_t>(xs - 1)] : 0.0;
+    if (c < HALF_NEG) return NEG_INF;
+    return ft->second - c;
+  }
+  void note_kind(long long* a, long long* b, long long* c, int st, int k) {
+    if (st < 0 || st >= ST_N) return;
+    if (k == 1) ++a[st];
+    else if (k == 2) ++b[st];
+    else if (k == 3) ++c[st];
+  }
+  int k_map_kind(int r, int qp) const {
+    if (r < 0 || qp + 1 > n - 1 || prArmY0.empty()) return 3;
+    const int xs = prArmXs[r], xp = prArmXp[r], hi = prArmY0[r + 1];
+    const int* yy = prYy.data();
+    const int k = static_cast<int>(std::upper_bound(yy + prArmY0[r], yy + hi, qp) - yy);
+    if (k >= hi) return 3;
+    const int mk = v_map_kind(xp, yy[k], xs);
+    return mk == 0 ? 3 : mk;
+  }
+  int h_map_kind(int a2, int j) const {
+    if (a2 < 0 || a2 >= n || !stem_) return 3;
+    bool full = false, any = false;
+    for (int c1 : partners_right[a2]) {
+      if (c1 <= j) continue;
+      auto it = stem_->prMu.find(key2(a2, c1));
+      if (it == stem_->prMu.end()) continue;
+      any = true;
+      if (p2_v_cap > 0 && static_cast<int>(it->second.size()) >= p2_v_cap) full = true;
+    }
+    if (!any) return 3;
+    return full ? 1 : 2;
+  }
   void rfv_put(uint64_t key, const PProf& p) {
     prVkI[key] = {static_cast<uint32_t>(prVkX.size()), static_cast<uint32_t>(p.k.size())};
     for (size_t i = 0; i < p.k.size(); ++i) {
@@ -5861,6 +6821,7 @@ class DP03 {
     const uint64_t key = key3(x, y, inner ? 1 : 0);
     auto it = prVod.find(key);
     if (it != prVod.end()) return it->second.span();
+    const auto rfv_t0 = std::chrono::steady_clock::now();
     const StemEst& st = *stem_;
     std::vector<ChainNbr> nb;
     pr_steps(x, y, inner, false, nb, pr_fast < 2 || pr_vmlsteps);
@@ -5893,25 +6854,174 @@ class DP03 {
     }
     ++rfv_od;
     rfv_od_ent += static_cast<long long>(o.xs.size());
+    rfv_sec += std::chrono::duration<double>(std::chrono::steady_clock::now() - rfv_t0).count();
     return prVod.emplace(key, std::move(o)).first->second.span();
   }
-  // --v-sweep: mu[b] of pair x.y. Missing b returns the smallest kept entry when --v-floor is on.
-  double mu_at(int x, int y, int xs) const {
-    if (!stem_) return NEG_INF;
-    auto it = stem_->prMu.find(key2(x, y));
-    if (it == stem_->prMu.end()) return NEG_INF;
-    auto jt = it->second.find(key2(xs, 0));
-    if (jt != it->second.end()) return jt->second;
-    if (!p2_v_floor) return NEG_INF;
-    auto ft = stem_->prMuFloor.find(key2(x, y));
-    return ft == stem_->prMuFloor.end() ? NEG_INF : ft->second;
+  // --v-sweep: mu[b] of pair x.y. Missing b: --v-cut-fb uses kappa_min/C_pre(b-1) on a
+  // full map; --v-floor uses the smallest kept mu or 0; else -inf.
+  void mu_dump_lazy(const std::unordered_map<uint64_t, PProf>& V) const {
+    if (g_mu_dump.empty()) return;
+    std::ofstream md(g_mu_dump);
+    for (const auto& kv : V) {
+      const int x = k_hi(kv.first), y = k_lo(kv.first);
+      std::unordered_map<int, double> grp;
+      for (size_t i = 0; i < kv.second.k.size(); ++i) {
+        if (!(kv.second.w[i] > HALF_NEG)) continue;
+        const int b = k_hi(kv.second.k[i]);
+        auto it = grp.find(b);
+        if (it == grp.end()) grp.emplace(b, kv.second.w[i]);
+        else it->second = log_add(it->second, kv.second.w[i]);
+      }
+      for (const auto& g : grp) md << "V " << x << " " << y << " " << g.first << " " << g.second << "\n";
+    }
+  }
+  static const char* trace_edge(int t, int trail) {
+    if (t == 0) return "E3 interior";
+    if (t == 1) return trail == 0 ? "E6 branch-qm-pair" : "E7 branch-qm-tail";
+    if (t == 2) return "E5 branch1";
+    return trail == 0 ? "E8 branch-qm2-pair" : "E8 branch-qm2-tail";
+  }
+  void trace_v(int x, int y, int b, const std::unordered_map<uint64_t, PProf>& V,
+               std::ostream& o) const {
+    auto at = [&](int px, int py, int pb, double& val) {
+      val = NEG_INF;
+      auto it = V.find(key2(px, py));
+      if (it == V.end()) return;
+      for (size_t i = 0; i < it->second.k.size(); ++i)
+        if (k_hi(it->second.k[i]) == pb && it->second.w[i] > HALF_NEG)
+          val = log_add(val, it->second.w[i]);
+    };
+    o << "TRACE " << x << " " << y << " " << b << "\n";
+    int cx = x, cy = y;
+    std::vector<ChainNbr> nb;
+    for (int hop = 0; hop < n; ++hop) {
+      if (cx == b) {
+        o << "  step " << hop << " born " << cx << " " << cy
+          << " edge V-seed/E4 exterior lead 0 trail 0 pk none\n";
+        return;
+      }
+      pr_steps(cx, cy, false, false, nb, true);
+      int bx = -1, by = -1, bt = -1, bl = 0, br = 0;
+      double bw = NEG_INF;
+      for (const ChainNbr& t : nb) {
+        double cv = NEG_INF;
+        if (t.x != b) at(t.x, t.y, b, cv);
+        if (t.x != b && !(cv > HALF_NEG)) continue;
+        const double s = t.w + (cv > HALF_NEG ? cv : 0.0);
+        if (!(s > bw)) continue;
+        bw = s;
+        bx = t.x;
+        by = t.y;
+        bt = t.t;
+        bl = cx - t.x - 1;
+        br = t.y - cy - 1;
+      }
+      if (bx < 0) {
+        o << "  step " << hop << " no-parent " << cx << " " << cy << "\n";
+        return;
+      }
+      const char* side = bt == 0 ? "interior" : bt == 1 ? "branch-left" : bt == 2 ? "branch-right" : "branch-both";
+      o << "  step " << hop << " " << cx << " " << cy << " -> " << bx << " " << by << " " << side
+        << " l1 " << (bt == 0 ? bl : 0) << " l2 " << (bt == 0 ? br : 0) << " lead "
+        << (bt == 2 || bt == 3 ? bl : 0) << " trail " << (bt == 1 || bt == 3 ? br : 0)
+        << " edge " << trace_edge(bt, bt == 1 || bt == 3 ? br : 0) << " pk none\n";
+      cx = bx;
+      cy = by;
+    }
+  }
+  void vquery_dump(const std::unordered_map<uint64_t, PProf>& V) const {
+    if (g_vquery_out.empty()) return;
+    std::ofstream out(g_vquery_out);
+    auto at_b = [&](const PProf& p, int b, double& val, double& mx) {
+      val = NEG_INF;
+      mx = NEG_INF;
+      std::unordered_map<int, double> grp;
+      grp.reserve(p.k.size() * 2 + 1);
+      for (size_t i = 0; i < p.k.size(); ++i) {
+        if (!(p.w[i] > HALF_NEG)) continue;
+        const int xs = k_hi(p.k[i]);
+        auto it = grp.find(xs);
+        if (it == grp.end()) grp.emplace(xs, p.w[i]);
+        else it->second = log_add(it->second, p.w[i]);
+      }
+      for (const auto& kv : grp) {
+        if (kv.second > mx) mx = kv.second;
+        if (kv.first == b) val = kv.second;
+      }
+    };
+    std::ofstream tr;
+    if (!g_vtrace_path.empty()) tr.open(g_vtrace_path);
+    for (const VQ& q : g_vquery) {
+      if (q.b >= 0) {
+        double val = NEG_INF, mx = NEG_INF;
+        auto it = V.find(key2(q.x, q.y));
+        if (it != V.end()) at_b(it->second, q.b, val, mx);
+        out << (q.tag == 1 ? "K " : "V ") << q.st << " " << q.x << " " << q.y << " " << q.b
+            << " " << val << " " << mx << "\n";
+        if (tr.is_open() && val > HALF_NEG) trace_v(q.x, q.y, q.b, V, tr);
+        continue;
+      }
+      double best = NEG_INF, best_mx = NEG_INF;
+      int nz = 0, maps = 0;
+      for (const auto& kv : V) {
+        if (k_hi(kv.first) != q.x || k_lo(kv.first) <= q.y) continue;
+        ++maps;
+        double val = NEG_INF, mx = NEG_INF;
+        at_b(kv.second, -1, val, mx);
+        if (mx > HALF_NEG) {
+          ++nz;
+          if (mx > best) {
+            best = mx;
+            best_mx = mx;
+          }
+        }
+      }
+      out << "H " << q.st << " " << q.x << " " << q.y << " " << maps << " " << nz << " " << best
+          << " " << best_mx << "\n";
+    }
+  }
+  void miss_k(int r, int qp, int st) {
+    if (g_miss_cap <= 0 || (st != ST_P3 && st != ST_S)) return;
+    if (r < 0 || qp + 1 > n - 1 || prArmY0.empty()) return;
+    const int xs = prArmXs[r], xp = prArmXp[r], hi = prArmY0[r + 1];
+    const int* yy = prYy.data();
+    const int k = static_cast<int>(std::upper_bound(yy + prArmY0[r], yy + hi, qp) - yy);
+    if (k >= hi || v_map_kind(xp, yy[k], xs) != 2) return;
+    miss_take(1, st, xp, yy[k], xs);
+  }
+  double mu_at(int x, int y, int xs, int st = -1) {
+    const int kind = v_map_kind(x, y, xs);
+    if (kind == 2) miss_take(0, st, x, y, xs);
+    if (kind == 0) {
+      auto it = stem_->prMu.find(key2(x, y));
+      return it->second.find(key2(xs, 0))->second;
+    }
+    note_kind(vm_i, vm_ii, vm_iii, st, kind);
+    if (p2_v_cut_fb && kind == 1) {
+      const double fb = v_cut_fb_mu(x, y, xs);
+      if (fb > HALF_NEG) {
+        ++vfb_n;
+        return fb;
+      }
+    }
+    if (p2_v_floor == 2) return 0.0;
+    if (p2_v_floor == 1) {
+      auto ft = stem_->prMuFloor.find(key2(x, y));
+      return ft == stem_->prMuFloor.end() ? NEG_INF : ft->second;
+    }
+    return NEG_INF;
   }
   // V of the root x.y (seed: x.y is the stem's inner pair) at the outer left end xs
   double rfv_root(int x, int y, bool seed, int xs) {
     if (p2_vsweep) {
       ++rfv_look;
-      const double v = mu_at(x, y, xs);
-      if (v < HALF_NEG) ++rfv_miss;
+      ++rfv_look_r;
+      const double v = mu_at(x, y, xs, ST_R);
+      if (v < HALF_NEG) {
+        ++rfv_miss;
+        ++rfv_miss_r;
+        ++rfv_key0_r;
+      }
       return v;
     }
     ++rfv_look;
@@ -5941,15 +7051,24 @@ class DP03 {
   double rfv_key(bool ls, int p, bool seed, int q, int xs) {
     if (p2_vsweep) {
       ++rfv_look;
+      ++rfv_look_u;
       std::vector<Closing> cl;
       if (ls) pr_ls_closings(p, seed, q, cl);
       else closings_rs(p, q, cl);
       double s = NEG_INF;
+      int missed = 0;
       for (const Closing& c : cl) {
-        const double v = mu_at(c.x, c.y, xs);
+        const double v = mu_at(c.x, c.y, xs, ST_U);
         if (v > HALF_NEG) s = log_add(s, c.w + v);
+        else ++missed;
       }
-      if (s < HALF_NEG) ++rfv_miss;
+      if (s < HALF_NEG) {
+        ++rfv_miss;
+        ++rfv_miss_u;
+        ++rfv_key0_u;
+      } else if (missed > 0) {
+        ++rfv_part_u;
+      }
       return s;
     }
     auto& m = prVkey[ls ? 0 : 1];
@@ -6082,7 +7201,7 @@ class DP03 {
         const double br = E.w_bp + E.at(x, y);
         if (br < HALF_NEG) continue;
         Mu& dst = pmu[key2(x, y)];
-        for (int xo = std::max(0, x - 1 - cap); xo < x; ++xo) {
+        for (int xo = ml_run_lo(x); xo < x; ++xo) {
           auto it = rq.find(xo);
           if (it == rq.end()) continue;
           double lw = E.w_cp * (x - xo - 1);
@@ -6259,7 +7378,7 @@ class DP03 {
           const double br = E.w_bp + E.at(x, y);
           if (br < HALF_NEG) continue;
           Ga& dst = pg[key2(x, y)];
-          for (int xo = std::max(0, x - 1 - cap); xo < x; ++xo) {
+          for (int xo = ml_run_lo(x); xo < x; ++xo) {
             auto it = rq.find(xo);
             if (it == rq.end()) continue;
             double lw = E.w_cp * (x - xo - 1);
@@ -6400,14 +7519,9 @@ class DP03 {
         const int p = k_hi(k), q = k_lo(k);
         double s = w;
         if (p > 0 && !st.prC.empty()) s += st.prC[static_cast<size_t>(p - 1)];
-        if (p2_g_suffix) {
-          const double sb = st.prS[static_cast<size_t>(q + 1)];
-          if (sb < HALF_NEG) continue;
-          s += sb;
-        } else {
-          if (q >= static_cast<int>(ntrUL.size()) || ntrUL[q] < HALF_NEG) continue;
-          s += ntrUL[q];
-        }
+        const double sb = st.prS[static_cast<size_t>(q + 1)];
+        if (sb < HALF_NEG) continue;
+        s += sb;
         v.push_back({k, w, s});
       }
       if (static_cast<int>(v.size()) > K) {
@@ -6499,7 +7613,7 @@ class DP03 {
         const double br = E.w_bp + E.at(x, y);
         if (br < HALF_NEG) continue;
         Ga& dst = pg[key2(x, y)];
-        for (int xo = std::max(0, x - 1 - cap); xo < x; ++xo) {
+        for (int xo = ml_run_lo(x); xo < x; ++xo) {
           auto it = rq.find(xo);
           if (it == rq.end()) continue;
           double lw = E.w_cp * (x - xo - 1);
@@ -6539,6 +7653,305 @@ class DP03 {
       fin[static_cast<size_t>(y)] = 1;
     }
     sw_ga[slot] = std::move(pg);
+  }
+
+  // Sweep prGamma (and the unused sw_fill) against a fresh lazy growth vector.
+  // Both sides use the final scan prefix. Writes --g-eq.
+  void g_eq_write() {
+    std::ofstream out(g_eq_path);
+    if (!out) {
+      std::fprintf(stderr, "[g-eq] cannot write %s\n", g_eq_path.c_str());
+      return;
+    }
+    auto rel = [](double a, double b) {
+      if (a < HALF_NEG && b < HALF_NEG) return 0.0;
+      if (a < HALF_NEG || b < HALF_NEG) return 1e300;
+      return std::fabs(std::expm1(a - b));
+    };
+    auto agg = [&](const std::unordered_map<uint64_t, double>* src, std::vector<double>& v) {
+      v.assign(static_cast<size_t>(n), NEG_INF);
+      if (!src) return;
+      for (const auto& [k, w] : *src) {
+        if (w < HALF_NEG) continue;
+        const int q = k_lo(k);
+        if (q < 0 || q >= n) continue;
+        v[static_cast<size_t>(q)] = log_add(v[static_cast<size_t>(q)], w + prefix_log(k_hi(k)));
+      }
+    };
+    auto from_rn = [&](const RN& r, std::vector<double>& v) {
+      v.assign(static_cast<size_t>(n), NEG_INF);
+      if (g_ntr_K > 0) {
+        for (const auto& [q, g] : r.T[0])
+          if (q >= 0 && q < n && g > HALF_NEG) v[static_cast<size_t>(q)] = log_add(v[static_cast<size_t>(q)], g);
+        return;
+      }
+      for (int m = 0; m < rnL; ++m) {
+        const RV& a = r.L[m];
+        for (size_t i = 0; i < a.v.size(); ++i) {
+          if (!(a.v[i] > 0.0)) continue;
+          const int q = a.lo + static_cast<int>(i);
+          if (q < 0 || q >= n) continue;
+          v[static_cast<size_t>(q)] = log_add(v[static_cast<size_t>(q)], a.mx + std::log(a.v[i]));
+        }
+      }
+    };
+    try {
+      sw_fill(0, n);
+    } catch (const std::exception& e) {
+      out << "fill_error " << e.what() << "\n";
+      std::fprintf(stderr, "[g-eq] sw_fill %s\n", e.what());
+    }
+    const bool saved = p2_sweep;
+    p2_sweep = false;
+    prRT.clear();
+    prRR.clear();
+    prRG.clear();
+    prRH.clear();
+    std::vector<std::pair<int, int>> pairs;
+    {
+      std::unordered_set<uint64_t> seen;
+      const std::vector<std::vector<int>>& src = pr_pair_list(true);
+      for (int x = 0; x < n; ++x)
+        for (int y : src[x]) {
+          const uint64_t k = key2(x, y);
+          if (seen.insert(k).second) pairs.emplace_back(x, y);
+        }
+      if (stem_)
+        for (const auto& kv : stem_->prGamma) {
+          const uint64_t k = kv.first;
+          if (seen.insert(k).second) pairs.emplace_back(k_hi(k), k_lo(k));
+        }
+    }
+    std::fprintf(stderr, "[g-eq] pairs %zu\n", pairs.size());
+    struct Bad {
+      int x, y, q;
+      double hy, gr, ad, r;
+    };
+    std::vector<Bad> top;
+    auto consider = [&](int x, int y, int q, double hy, double gr) {
+      const double r = rel(hy, gr);
+      if (!(r > 1e-9)) return;
+      const double ad = (hy < HALF_NEG || gr < HALF_NEG) ? 1e300 : std::fabs(hy - gr);
+      top.push_back({x, y, q, hy, gr, ad, r});
+    };
+    long long ncmp = 0, nbad = 0, ncmp_f = 0, nbad_f = 0;
+    std::unordered_set<uint64_t> bad_pair;
+    std::vector<double> hy, gr, fl, spec_h, spec_g;
+    bool have_spec = false;
+    int built = 0;
+    for (const auto& [x, y] : pairs) {
+      const RN& rn = rec_root(x, y, false);
+      from_rn(rn, gr);
+      const std::unordered_map<uint64_t, double>* hs = nullptr;
+      {
+        auto it = sw_ga[0].find(key2(x, y));
+        if (it != sw_ga[0].end()) hs = &it->second;
+      }
+      agg(hs, hy);
+      const std::unordered_map<uint64_t, double>* fs = nullptr;
+      auto fit = sw_ga[0].find(key2(x, y));
+      if (fit != sw_ga[0].end()) fs = &fit->second;
+      agg(fs, fl);
+      bool any = false;
+      for (int q = 0; q < n; ++q) {
+        const double a = hy[static_cast<size_t>(q)], b = gr[static_cast<size_t>(q)];
+        if (a < HALF_NEG && b < HALF_NEG) continue;
+        ++ncmp;
+        if (rel(a, b) > 1e-9) {
+          ++nbad;
+          any = true;
+          consider(x, y, q, a, b);
+        }
+        const double c = fl[static_cast<size_t>(q)];
+        if (c < HALF_NEG && b < HALF_NEG) continue;
+        ++ncmp_f;
+        if (rel(c, b) > 1e-9) ++nbad_f;
+      }
+      if (any) bad_pair.insert(key2(x, y));
+      if (x == 4 && y == 45) {
+        spec_h = hy;
+        spec_g = gr;
+        have_spec = true;
+      }
+      if (++built % 400 == 0) std::fprintf(stderr, "[g-eq] built %d\n", built);
+    }
+    p2_sweep = saved;
+    long long ncmp_p = 0, nbad_p = 0, nbad_pf = 0;
+    {
+      geq_pre = true;
+      p2_sweep = false;
+      prRT.clear();
+      prRR.clear();
+      prRG.clear();
+      prRH.clear();
+      int built_p = 0;
+      for (const auto& [x, y] : pairs) {
+        const RN& rn = rec_root(x, y, false);
+        from_rn(rn, gr);
+        const std::unordered_map<uint64_t, double>* hs = nullptr;
+        {
+          auto it = sw_ga[0].find(key2(x, y));
+          if (it != sw_ga[0].end()) hs = &it->second;
+        }
+        agg(hs, hy);
+        const std::unordered_map<uint64_t, double>* fs = nullptr;
+        auto fit = sw_ga[0].find(key2(x, y));
+        if (fit != sw_ga[0].end()) fs = &fit->second;
+        agg(fs, fl);
+        for (int q = 0; q < n; ++q) {
+          const double a = hy[static_cast<size_t>(q)], b = gr[static_cast<size_t>(q)],
+                       c = fl[static_cast<size_t>(q)];
+          if (a < HALF_NEG && b < HALF_NEG) continue;
+          ++ncmp_p;
+          if (rel(a, b) > 1e-9) ++nbad_p;
+          if (!(c < HALF_NEG && b < HALF_NEG) && rel(c, b) > 1e-9) ++nbad_pf;
+        }
+        if (x == 1 && y == 5) {
+          out << "pre15\n";
+          for (int q = 0; q < n; ++q) {
+            const double a = hy[static_cast<size_t>(q)], b = gr[static_cast<size_t>(q)],
+                         c = fl[static_cast<size_t>(q)];
+            if (a < HALF_NEG && b < HALF_NEG && c < HALF_NEG) continue;
+            out << "pq " << q << " " << std::setprecision(17) << a << " " << c << " " << b << "\n";
+          }
+        }
+        if (++built_p % 400 == 0) std::fprintf(stderr, "[g-eq] pre %d\n", built_p);
+      }
+      geq_pre = false;
+      prRT.clear();
+      prRR.clear();
+      prRG.clear();
+      prRH.clear();
+      p2_sweep = saved;
+    }
+    out << "pre " << ncmp_p << " " << nbad_p << " " << nbad_pf << "\n";
+    std::sort(top.begin(), top.end(), [](const Bad& a, const Bad& b) {
+      if (a.ad != b.ad) return a.ad > b.ad;
+      if (a.y != b.y) return a.y < b.y;
+      if (a.x != b.x) return a.x < b.x;
+      return a.q < b.q;
+    });
+    if (top.size() > 10) top.resize(10);
+    out << "cmp " << ncmp << " " << nbad << "\n";
+    out << "fill " << ncmp_f << " " << nbad_f << "\n";
+    out << "pairs " << pairs.size() << " bad_pairs " << bad_pair.size() << "\n";
+    for (size_t i = 0; i < top.size(); ++i)
+      out << "top " << i << " " << top[i].x << " " << top[i].y << " " << top[i].q << " " << std::setprecision(17)
+          << top[i].hy << " " << top[i].gr << " " << top[i].ad << " " << top[i].r << "\n";
+    out << "vec " << (have_spec ? 1 : 0) << "\n";
+    if (have_spec) {
+      for (int q = 0; q < n; ++q) {
+        const double a = spec_h[static_cast<size_t>(q)], b = spec_g[static_cast<size_t>(q)];
+        if (a < HALF_NEG && b < HALF_NEG) continue;
+        out << "vq " << q << " " << std::setprecision(17) << a << " " << b << "\n";
+      }
+    }
+    std::unordered_map<uint64_t, int> depth;
+    std::function<int(int, int)> dep = [&](int x, int y) -> int {
+      const uint64_t k = key2(x, y);
+      auto it = depth.find(k);
+      if (it != depth.end()) return it->second;
+      depth.emplace(k, 0);
+      std::vector<ChainNbr> nb;
+      pr_steps(x, y, false, true, nb);
+      int d = 0;
+      if (!nb.empty()) {
+        d = n + 1;
+        for (const ChainNbr& t : nb) d = std::min(d, 1 + dep(t.x, t.y));
+      }
+      depth[k] = d;
+      return d;
+    };
+    int bx = -1, by = -1, bd = n + 2;
+    for (uint64_t k : bad_pair) {
+      const int x = k_hi(k), y = k_lo(k);
+      const int d = dep(x, y);
+      if (d < bd || (d == bd && (y < by || (y == by && x < bx)))) {
+        bd = d;
+        bx = x;
+        by = y;
+      }
+    }
+    out << "short " << bx << " " << by << " " << (bx < 0 ? -1 : bd) << "\n";
+    p2_sweep = false;
+    long long ibad = 0;
+    int ix = -1, iy = -1, idp = n + 2;
+    for (uint64_t k : bad_pair) {
+      const int x = k_hi(k), y = k_lo(k);
+      std::vector<ChainNbr> nb;
+      pr_steps(x, y, false, true, nb);
+      bool ml = false;
+      for (const ChainNbr& t : nb)
+        if (t.t != 0) ml = true;
+      if (ml) continue;
+      ++ibad;
+      const int d = dep(x, y);
+      if (d < idp || (d == idp && (y < iy || (y == iy && x < ix)))) {
+        idp = d;
+        ix = x;
+        iy = y;
+      }
+    }
+    out << "ibad " << ibad << " ishort " << ix << " " << iy << " " << (ix < 0 ? -1 : idp) << "\n";
+    if (bx >= 0) {
+      int x = bx, y = by;
+      for (int hop = 0; hop < n && x >= 0; ++hop) {
+        const RN& rn = rec_root(x, y, false);
+        from_rn(rn, gr);
+        const std::unordered_map<uint64_t, double>* hs = nullptr;
+        {
+          auto it = sw_ga[0].find(key2(x, y));
+          if (it != sw_ga[0].end()) hs = &it->second;
+        }
+        agg(hs, hy);
+        int nd = 0;
+        for (int q = 0; q < n; ++q)
+          if (rel(hy[static_cast<size_t>(q)], gr[static_cast<size_t>(q)]) > 1e-9) ++nd;
+        std::vector<ChainNbr> nb;
+        pr_steps(x, y, false, true, nb);
+        out << "node " << hop << " " << x << " " << y << " depth " << dep(x, y) << " ndiff " << nd << " nstep "
+            << nb.size() << " at " << std::setprecision(17) << (E.end_ok(x, y) ? E.at(x, y) : NEG_INF) << " pref "
+            << prefix_log(x) << "\n";
+        if (hop == 0) {
+          for (int q = 0; q < n; ++q) {
+            const double a = hy[static_cast<size_t>(q)], b = gr[static_cast<size_t>(q)];
+            if (a < HALF_NEG && b < HALF_NEG) continue;
+            out << "sq " << q << " " << std::setprecision(17) << a << " " << b << "\n";
+            if (!(rel(a, b) > 1e-9)) continue;
+            out << "diffq " << q << " " << std::setprecision(17) << a << " " << b << "\n";
+            if (hs) {
+              for (const auto& [k, w] : *hs)
+                if (k_lo(k) == q)
+                  out << "raw " << k_hi(k) << " " << q << " " << std::setprecision(17) << w << "\n";
+            }
+            for (size_t s = 0; s < nb.size(); ++s) {
+              const RN& ch = rec_root(nb[s].x, nb[s].y, false);
+              std::vector<double> cg;
+              from_rn(ch, cg);
+              const double cv = cg[static_cast<size_t>(q)];
+              if (cv < HALF_NEG) continue;
+              out << "via " << s << " " << q << " " << std::setprecision(17) << (cv + nb[s].w) << "\n";
+            }
+          }
+        }
+        int nxt = -1, ny = -1, bestd = n + 3;
+        for (size_t s = 0; s < nb.size(); ++s) {
+          const int d = dep(nb[s].x, nb[s].y);
+          out << "step " << s << " t " << nb[s].t << " " << nb[s].x << " " << nb[s].y << " " << std::setprecision(17)
+              << nb[s].w << " depth " << d << " bad " << (bad_pair.count(key2(nb[s].x, nb[s].y)) ? 1 : 0) << "\n";
+          if (d < bestd) {
+            bestd = d;
+            nxt = nb[s].x;
+            ny = nb[s].y;
+          }
+        }
+        if (nxt < 0 || dep(x, y) == 0) break;
+        x = nxt;
+        y = ny;
+      }
+    }
+    out.flush();
+    std::fprintf(stderr, "[g-eq] cmp %lld bad %lld fill %lld bad %lld\n", ncmp, nbad, ncmp_f, nbad_f);
   }
 
   void pr_build_static() {
@@ -6789,6 +8202,8 @@ class DP03 {
     for (int x = n - 1; x >= 0; --x) prXpFirst[x] = std::min(prXpFirst[x], prXpFirst[x + 1]);
     pr_arms = prA;
     pr_arm_entries = static_cast<long long>(pr_vxs ? prYy.size() : prEy.size());
+    pr_yw_from_sweep();
+    if (k_bound) k_bound_check();
     if (g_mem_log) {
       std::vector<MemItem> it{{"V_ats", static_cast<long long>(ats.size()), msz::vec(ats)}};
       mem_items(it, "", false, true);
@@ -7165,6 +8580,75 @@ class DP03 {
 
   // phi(arm r) at q' as Step A computes it (separable: from the suffix sums prSF; with
   // --pr-partner-span W only the entries q' < y' <= q' + W, summed in y' order).
+  // --v-sweep: lK reads the swept b_V entries. mu is the profile weight; the arm
+  // base (pair energy, stem weight, pair_bonus) stays the one prYw was built with.
+  // A partner the sweep did not keep is -inf. The floor is not applied here.
+  void pr_yw_from_sweep() {
+    if (!p2_vsweep || !stem_ || stem_->prMu.empty()) return;
+    long long rep = 0, miss = 0, ent = 0;
+    for (int r = 0; r < prA; ++r) {
+      const int xs = prArmXs[r], xp = prArmXp[r];
+      for (int k = prArmY0[r]; k < prArmY0[r + 1]; ++k) {
+        ++ent;
+        const int yp = prYy[k];
+        double mu = NEG_INF;
+        auto it = stem_->prMu.find(key2(xp, yp));
+        if (it != stem_->prMu.end()) {
+          auto jt = it->second.find(key2(xs, 0));
+          if (jt != it->second.end()) mu = jt->second;
+        }
+        if (mu < HALF_NEG && p2_v_cut_fb &&
+            p2_v_cap > 0 && it != stem_->prMu.end() &&
+            static_cast<int>(it->second.size()) >= p2_v_cap) {
+          mu = v_cut_fb_mu(xp, yp, xs);
+          if (mu > HALF_NEG) ++vfb_n;
+        }
+        if (mu < HALF_NEG) {
+          prYw[k] = NEG_INF;
+          ++miss;
+          continue;
+        }
+        prYw[k] = (mu + (E.at(xp, yp) + E.w_stem)) + pair_bonus;
+        ++rep;
+      }
+    }
+    prSF.clear();
+    std::fprintf(stderr, "[v-sweep-lk] arms %d entries %lld replaced %lld missing %lld\n", prA, ent,
+                 rep, miss);
+  }
+  // lK(arm, q') >= lKx(arm, q') on the weights lK is about to use. One pass, not on the hot path.
+  void k_bound_check() {
+    pr_sf_build();
+    long long checks = 0, bad = 0, bad_inf = 0, bad_fin = 0;
+    double worst = 0.0, wub = 0.0, wex = 0.0;
+    int wr = -1, wq = -1;
+    for (int r = 0; r < prA; ++r) {
+      for (int q = 0; q + 1 <= n - 1; ++q) {
+        const double ub = lK(r, q);
+        const double ex = lKx_sum(r, q);
+        ++checks;
+        const bool ub_fin = ub > HALF_NEG, ex_fin = ex > HALF_NEG;
+        double gap = 0.0;
+        if (ex_fin && !ub_fin) gap = 1e300;
+        else if (ex_fin && ub_fin) gap = ex - ub;
+        if (gap > 1e-8) {
+          ++bad;
+          if (!ub_fin) ++bad_inf;
+          else ++bad_fin;
+          if (gap > worst) {
+            worst = gap;
+            wub = ub;
+            wex = ex;
+            wr = r;
+            wq = q;
+          }
+        }
+      }
+    }
+    std::fprintf(stderr,
+                 "[k-bound] checks %lld violations %lld inf %lld finite %lld worst %.6e ub %.6e ex %.6e arm %d q %d\n",
+                 checks, bad, bad_inf, bad_fin, worst, wub, wex, wr, wq);
+  }
   void pr_sf_build() {
     if (!pr_aq_sep || !prSF.empty()) return;
     const StemEst& st = *stem_;
@@ -7173,7 +8657,7 @@ class DP03 {
       double acc = NEG_INF;
       for (int k = prArmY0[r + 1] - 1; k >= prArmY0[r]; --k) {
         const double z = st.Qzbar(0, prYy[k] - 1);
-        if (z > HALF_NEG) acc = log_add(acc, z + prYw[k]);
+        if (z > HALF_NEG && prYw[k] > HALF_NEG) acc = log_add(acc, z + prYw[k]);
         prSF[k] = acc;
       }
     }
@@ -7188,7 +8672,7 @@ class DP03 {
       double acc = NEG_INF;
       for (; k < hi && (pr_pspan <= 0 || prYy[k] - qp <= pr_pspan); ++k) {
         const double z = pr_aq_sep ? st.Qzbar(0, prYy[k] - 1) : st.Qzbar(qp + 1, prYy[k] - 1);
-        if (z > HALF_NEG) acc = log_add(acc, z + prYw[k]);
+        if (z > HALF_NEG && prYw[k] > HALF_NEG) acc = log_add(acc, z + prYw[k]);
       }
       return acc;
     }
@@ -8945,7 +10429,7 @@ class DP03 {
     for (const ChainNbr& t : nb)
       if (t.t == 0) rTerms.push_back({&prRG.find(key2(t.x, t.y))->second, t.w, 0});
     MlSplit s;
-    pr_split(x, y, true, s);
+    pr_split(x, y, !geq_pre, s);
     if (s.on) {
       if (lpf) {
         lpf_ml_cand += static_cast<long long>(s.qm.size() + s.lr.size());
@@ -9017,7 +10501,7 @@ class DP03 {
         stk.pop_back();
         continue;
       }
-      pr_steps(a, b, false, true, nb);
+      pr_steps(a, b, false, !geq_pre, nb);
       if (nb.empty() && p2_g_fb && p2_g_mode > 0 && !g_in_set(a, b)) g_one_step(a, b, nb);
       bool ready = true;
       for (const ChainNbr& t : nb)
@@ -9039,11 +10523,19 @@ class DP03 {
   }
   // One root from the swept gamma. g at q' already includes the scan prefix, as rec_root stores it.
   RN sw_as_rn(int x, int y, bool inner) {
+    if (p2_sweep && l2r_mode != 0 && stem_ && !sw_filled) {
+      sw_filled = true;
+      sw_fill(0, n);
+      sw_fill(1, std::min(pr_loop, cap));
+    }
     RN r;
     std::unordered_map<int, double> byq;
     const std::unordered_map<uint64_t, double>* src = nullptr;
     std::unordered_map<uint64_t, std::unordered_map<uint64_t, double>>::const_iterator git;
-    if (stem_ && !stem_->prGamma.empty()) {
+    if (sw_filled) {
+      auto it = sw_ga[inner ? 1 : 0].find(key2(x, y));
+      if (it != sw_ga[inner ? 1 : 0].end()) src = &it->second;
+    } else if (stem_ && !stem_->prGamma.empty()) {
       git = stem_->prGamma.find(key2(x, y));
       if (git != stem_->prGamma.end()) src = &git->second;
     } else {
@@ -9121,7 +10613,7 @@ class DP03 {
     }
     PrGrowTimer gt(*this);
     std::vector<ChainNbr> nb;
-    pr_steps(x, y, inner, true, nb);
+    pr_steps(x, y, inner, !geq_pre, nb);
     if (nb.empty() && p2_g_fb && p2_g_mode > 0 && !g_in_set(x, y)) g_one_step(x, y, nb);
     count_steps(0, nb);
     for (const ChainNbr& t : nb) rec_gbuild(t.x, t.y);
@@ -9134,16 +10626,26 @@ class DP03 {
     return prRR.emplace(key, std::move(r)).first->second;
   }
   const RN& rec_key(bool ls, int p, bool seed, int q) {
+    const auto tick = []() { return std::chrono::steady_clock::now(); };
+    auto t0 = tick();
+    auto charge = [&](std::chrono::steady_clock::time_point t1) {
+      sx_rkey_sec += std::chrono::duration<double>(t1 - t0).count();
+    };
     std::unordered_map<int, RN>& m = ls ? prRKls : prRKrs;
     const int key = ls ? 2 * p + (seed ? 1 : 0) : p;
     auto it = m.find(key);
-    if (it != m.end()) return it->second;
+    if (it != m.end()) {
+      charge(tick());
+      return it->second;
+    }
     PrGrowTimer gt(*this);
     std::vector<Closing> cl;
     if (ls) pr_ls_closings(p, seed, q, cl);
     else closings_rs(p, q, cl);
+    charge(tick());
     std::vector<RTerm> t;
     for (const Closing& c : cl) t.push_back({&rec_root(c.x, c.y, false), c.w, 0});
+    t0 = tick();
     rTerms = std::move(t);
     racc_begin();
     racc_refs();
@@ -9154,7 +10656,9 @@ class DP03 {
     rec_stat(2, r);
     gm_step += rbytes(r);
     gm_update();
-    return m.emplace(key, std::move(r)).first->second;
+    auto placed = m.emplace(key, std::move(r)).first;
+    charge(tick());
+    return placed->second;
   }
 
   // --grow-trunc: the kept (index, log g) of g_L (q') and g_R (p') of an evaluated root / key,
@@ -9714,7 +11218,7 @@ class DP03 {
         if (dz) w += E.run(y + 1, yo - 1);
         t.push_back(w);
       }
-      if (x - xo - 1 <= cap && rq > HALF_NEG) {
+      if (ml_run_ok(x - xo - 1) && rq > HALF_NEG) {
         long double w = rq + br + static_cast<long double>(E.w_cp) * (x - xo - 1) + cl;
         if (dz) w += E.run(xo + 1, x - 1);
         t.push_back(w);
@@ -10838,6 +12342,14 @@ class DP03 {
                  BT_NAMES[bt], BT_NAMES[src], j, v, a, b, c, d, rank, cands, score, w);
   }
 
+  // Pass-2 / l2r table drop (R,U,S,P1-P3,…): same D line shape; table/src are l2r names.
+  void note_l2r_drop(const char* tname, int j, int v, int a, int b, int c, int d, size_t rank,
+                     size_t cands, double score) {
+    if (!drops) return;
+    std::fprintf(drops->f, "D %s %s %s %d %d %d %d %d %d %zu %zu %.9g nan\n", drops->id.c_str(),
+                 tname, tname, j, v, a, b, c, d, rank, cands, score);
+  }
+
   // --dump-kept: one kept candidate of a stem / helper ranking event (fields of note_drop;
   // w = exact w, nan if not in the exact state file or without one).
   void note_kept(int bt, int j, int v, int a, int b, int c, int d, size_t rank, size_t cands,
@@ -10908,8 +12420,7 @@ class DP03 {
   }
 
   // extra_row / extra_at: Qm2, dropped with Qm (bt = BT_QM).
-  void prune2(std::vector<double>& table, OMap& at, int j, int bt, std::vector<double>* extra_row,
-              OMap* extra_at) {
+  void prune2(AtView& table, OMap& at, int j, int bt, AtView* extra_row, OMap* extra_at) {
     const int beam = tbeam[bt];
     if (remove_keys) {
       for (size_t r = 0; r < at.slots(); ++r) {
@@ -10920,7 +12431,12 @@ class DP03 {
       }
       at.compact();
     }
-    if (beam <= 0 || at.live <= beam) return;
+    if (beam <= 0 || at.live <= beam) {
+      if (g_beam_stats.f && beam > 0)
+        g_beam_stats.log_prune(BT_NAMES[bt], j, static_cast<size_t>(at.live),
+                               static_cast<size_t>(at.live), 0.0, 0);
+      return;
+    }
     std::vector<std::pair<double, int>> ranked;
     ranked.reserve(at.live);
     // --stem-est-principled: Qp by alpha + log Ctx(i, j); -nested: Qb / Qm / Qm2 by alpha +
@@ -10960,6 +12476,14 @@ class DP03 {
                 if (a.first != b.first) return a.first > b.first;
                 return a.second > b.second;
               });
+    if (g_beam_stats.f) {
+      std::vector<double> keys;
+      keys.reserve(ranked.size());
+      for (const auto& e : ranked) keys.push_back(e.first);
+      const size_t kept_n = static_cast<size_t>(beam);
+      g_beam_stats.log_prune(BT_NAMES[bt], j, ranked.size(), kept_n,
+                             BeamStats::mass_share(keys, kept_n), 1);
+    }
     std::vector<char> keep(n, 0);
     for (int k = 0; k < beam; ++k) keep[ranked[k].second] = 1;
     if (drops) {
@@ -10983,10 +12507,10 @@ class DP03 {
     if (extra_at) extra_at->compact();
   }
 
-  void set_pair(std::vector<double>& table, std::vector<OMap>& at, int i, int j, double val) {
+  void set_pair(AtView& table, std::vector<OMap>& at, int i, int j, double val) {
     if (val < HALF_NEG) return;
-    double& t = table[ix(i, j)];
-    t = log_add(t, val);
+    double t = log_add(static_cast<double>(table[ix(i, j)]), val);
+    table[ix(i, j)] = t;
     at[j].set(i, t);
   }
 
@@ -10997,12 +12521,12 @@ class DP03 {
       if (is_m2) rsQm2[j & 1].P.add(i, val);
       return;
     }
-    double& t = Qm[ix(i, j)];
-    t = log_add(t, val);
+    double t = log_add(static_cast<double>(Qm[ix(i, j)]), val);
+    Qm[ix(i, j)] = t;
     Qm_at[j].set(i, t);
     if (is_m2) {
-      double& t2 = Qm2[ix(i, j)];
-      t2 = log_add(t2, val);
+      double t2 = log_add(static_cast<double>(Qm2[ix(i, j)]), val);
+      Qm2[ix(i, j)] = t2;
       Qm2_at[j].set(i, t2);
     }
   }
@@ -11056,9 +12580,22 @@ class DP03 {
   bool l2r_check_R = false;
   struct LFam {
     bool isU = false;
-    std::vector<Tab4> G, Gs, Gls, Glss, Grs;
+    std::vector<Tab4> G, Gs, Gls, Glss, Grs, Glt;
+    // --grammar simple: M, M2, Multi. M2 groups with v >= n are M5 (stem then nested);
+    // v < n are M4 (nested then stem). The logical group key is v % n.
+    std::vector<Tab4> SM, SM2, SMulti;
   };
   LFam LA, LB;
+  bool grammar_simple = false;
+  bool c_trace = false;
+  long long gs_fill = 0, gs_phase = 0, gs_lead = 0, gs_over = 0, gs_m[8] = {};
+  // Kept after each type's own beam: R^M, R^M2, R^Multi, U^M, U^M2, U^Multi.
+  long long gs_tab_pre[6] = {}, gs_tab_kept[6] = {}, gs_tab_max[6] = {};
+  struct LeadCol {
+    std::vector<double> w;
+  };
+  std::vector<LeadCol> gsLead;
+  std::unordered_set<uint64_t> gs_seedA, gs_seedB;
   struct SSt {
     double P, U1, U2, c, F;
     double bP, bU1, bU2, bc, bF;
@@ -11086,8 +12623,9 @@ class DP03 {
   std::vector<int> lmaxR;  // largest y with pairs(x, y) and end_ok(x, y), -1 if none
   enum { LT_QZ, LT_QM, LT_QB, LT_QP, LT_AG, LT_AGS, LT_ALS, LT_ARS, LT_BG, LT_BGS, LT_BLS,
          LT_BRS, LT_S, LT_P1, LT_P2, LT_P3, LT_N };
-  // --l2r-spawn inc: the A seeds built in scan order from three filler tables (SMap keyed
-  // key3(a2, xs, x'), unused keys 0):
+  // --l2r-spawn inc: the A seeds built in scan order from three filler tables. The column
+  // is the right end, so the index counts are P1(a, t) = 2, P2(a, b, t) = 3, P3(a, b, c, t) = 4.
+  // key3 packs the indices other than t; unused slots stay 0.
   //   P1(a2, j) = Qz(a2+1, j), opened with c = 1 at j = a2, extended as S (fill_Qz automaton);
   //   P2(a2, xs, j) = P1(a2, xs-1) carried (value in F): B's arm xs.. is weighed later by U;
   //   P3(a2, xs, x', j) = P2(a2, xs, x') Qz(x'+1, j), opened with c = P2 at j = x', extended as S;
@@ -11096,6 +12634,38 @@ class DP03 {
   std::vector<SMap> LP1, LP2, LP3;
   int l2r_done[LT_N];
   long long l2r_tr[LT_N] = {};
+  // l2r_grow edges that land in R or U: 0..3 R interior/(f)/(g)/(h), 4..7 the same for U.
+  int ext_slot = -1;
+  long long ext_n[8] = {};
+  // Loop iterations, including ones that fail the pair check. [0] R, [1] U.
+  long long it_int[2] = {}, it_h[2] = {}, it_ls[2] = {}, it_rs[2] = {};
+  // Cumulative counters at the end of each scan column, for the last-20% means.
+  struct ColCnt {
+    long long iti, ith, itls, itrs, tail, edge, qz, k, qm;
+  };
+  std::vector<ColCnt> col_cnt;
+  bool next_pair = false;
+  void note_col() {
+    long long edge = 0;
+    for (int s = 0; s < 8; ++s) edge += ext_n[s];
+    col_cnt.push_back({it_int[0] + it_int[1], it_h[0] + it_h[1], it_ls[0] + it_ls[1],
+                       it_rs[0] + it_rs[1], rlt_ext, edge, qz_reads, sx_k_n, qm_kept_n});
+  }
+  // Qp after the per-position beam (preset beam). pre is the column before prune2.
+  long long qp_pre_n = 0, qp_kept_n = 0, qp_bind_n = 0;
+  int qp_pre_max = 0, qp_kept_max = 0, qp_beam = 0;
+  // Qm keys after the per-column beam.
+  long long qm_pre_n = 0, qm_kept_n = 0, qm_bind_n = 0;
+  int qm_pre_max = 0, qm_kept_max = 0, qm_beam = 0;
+  // --rlt: case (f) right flank kept as a one-base tail. rlt_beam 0 does not prune.
+  bool rlt = false;
+  int rlt_beam = 0;
+  long long rlt_kept = 0;
+  int rlt_max = 0;
+  long long rlt_ext = 0;
+  long long rlt_kept_f[2] = {};
+  int rlt_max_f[2] = {};
+  std::vector<int> rlt_pos[2];
   // seconds: A grow+helpers, S, B grow+helpers, closes, spawn, checks
   double l2r_sec[6] = {};
   long long lc_R_n = 0, lc_R_mis = 0, lc_Qp_n = 0, lc_Qp_mis = 0;
@@ -11114,7 +12684,14 @@ class DP03 {
       F->Gls.assign(n, Tab4{});
       F->Glss.assign(n, Tab4{});
       F->Grs.assign(n, Tab4{});
+      if (rlt) F->Glt.assign(n, Tab4{});
+      if (grammar_simple) {
+        F->SM.assign(n, Tab4{});
+        F->SM2.assign(n, Tab4{});
+        F->SMulti.assign(n, Tab4{});
+      }
     }
+    if (grammar_simple) gsLead.assign(n, LeadCol{});
     LS.assign(n, SMap{});
     if (l2r_inc) {
       LP1.assign(n, SMap{});
@@ -11122,6 +12699,7 @@ class DP03 {
       LP3.assign(n, SMap{});
     }
     if (l2r_mode == 2) LQp.assign(static_cast<size_t>(n) * n, NEG_INF);
+    ensure_pairs();
     lmaxR.assign(n, -1);
     for (int x = 0; x < n; ++x)
       for (int y : partners_right[x])
@@ -11143,6 +12721,7 @@ class DP03 {
   void lacc(Tab4& t, int lt, int v, int p, int u, double val) {
     if (val < HALF_NEG) return;
     ++l2r_tr[lt];
+    if (ext_slot >= 0) ++ext_n[ext_slot];
     t.acc(v, p, u, val);
   }
   // Every transition of the grow / helper tables is target (v, p, u) += s.a + w (+ Qm at m
@@ -11160,6 +12739,165 @@ class DP03 {
     if (qm_i >= 0) add2b(qmp_b(), qm_i, qm_j, t->b + s.a + w);
   }
 
+  // Tail key packs the run's left end s with the carried u (xs for R, a' for U).
+  int tail_pack(int s, int u) const { return s * n + u; }
+  void tail_unpack(int packed, int& s, int& u) const {
+    s = packed / n;
+    u = packed - s * n;
+  }
+  // Log weight added when the unpaired flank's right end becomes `right` (s == right: a new
+  // one-base run). Dangles some: one base is s1, a longer run is d5(left) + d3(right).
+  double tail_extend(int s, int right) const {
+    if (!dz) return E.w_cp;
+    if (s == right) return E.w_cp + E.s1w[right];
+    if (right - s == 1) return E.w_cp + (E.d5w[s] + E.d3w[right]) - E.s1w[s];
+    return E.w_cp + E.d3w[right] - E.d3w[right - 1];
+  }
+  void l2r_prune_by_inside(Tab4& t, int beam) {
+    size_t tot = 0;
+    for (const Grp& g : t.grps) tot += g.ents.size();
+    if (beam <= 0 || tot <= static_cast<size_t>(beam)) return;
+    std::vector<double> sc;
+    sc.reserve(tot);
+    for (const Grp& g : t.grps)
+      for (const Ent& e : g.ents) sc.push_back(e.a);
+    std::vector<char> keep;
+    keep_mask(sc, keep, beam);
+    filter_step(t, keep);
+  }
+  // Rank by C(p-1) + inside. Keys only; the stored inside is unchanged.
+  void l2r_prune_prefix(Tab4& t, int b, int slot = -1) {
+    size_t tot = 0;
+    for (const Grp& g : t.grps) tot += g.ents.size();
+    size_t kept = tot;
+    if (b > 0 && tot > static_cast<size_t>(b)) {
+      std::vector<double> sc;
+      sc.reserve(tot);
+      for (const Grp& g : t.grps)
+        for (const Ent& e : g.ents) sc.push_back(prefix_log(e.p) + e.a);
+      std::vector<char> keep;
+      keep_mask(sc, keep, b);
+      filter_step(t, keep);
+      kept = 0;
+      for (const Grp& g : t.grps) kept += g.ents.size();
+    }
+    if (slot >= 0) {
+      gs_tab_pre[slot] += static_cast<long long>(tot);
+      gs_tab_kept[slot] += static_cast<long long>(kept);
+      if (static_cast<long long>(kept) > gs_tab_max[slot])
+        gs_tab_max[slot] = static_cast<long long>(kept);
+    }
+  }
+  // Same score as Rls / Uls (kind 1, not a seed). The packed run start is not part of the key.
+  void l2r_prune_tail(LFam& F, Tab4& t, int j) {
+    size_t tot = 0;
+    for (const Grp& g : t.grps) tot += g.ents.size();
+    if (rlt_beam <= 0 || tot <= static_cast<size_t>(rlt_beam)) return;
+    std::vector<double> sc;
+    sc.reserve(tot);
+    for (const Grp& g : t.grps)
+      for (const Ent& e : g.ents) {
+        int run_s, uu;
+        tail_unpack(e.u, run_s, uu);
+        (void)run_s;
+        if (!F.isU) {
+          const RN& r = rec_key(true, e.p, false, j);
+          const int arm = larm(uu, g.v);
+          const double s = lsc_L(r, arm, 1);
+          sc.push_back(s > HALF_NEG ? e.a + s + lkb_arm(e.p, arm) : NEG_INF);
+        } else {
+          double s;
+          if (g_rfv) s = rfv_key(true, e.p, false, j, g.v);
+          else s = lsc_R(rec_key(true, e.p, false, j), g.v);
+          const double add = prefix_log(uu) + (lsub_c ? lrho(uu) : lkb_xs(uu, g.v));
+          sc.push_back(s > HALF_NEG ? e.a + s + add + (lLam.empty() ? 0.0 : lLam[uu]) : NEG_INF);
+        }
+      }
+    std::vector<char> keep;
+    keep_mask(sc, keep, rlt_beam);
+    filter_step(t, keep);
+  }
+  // Rlt/Ult at j: Rls/Uls at j-1 plus one unpaired base, and every previous tail plus one base.
+  void l2r_tail(LFam& F, int j) {
+    if (!rlt || j < 1) return;
+    Tab4& dst = F.Glt[j];
+    const double add_new = tail_extend(j, j);
+    for (const Grp& g : F.Gls[j - 1].grps)
+      for (const Ent& e : g.ents) {
+        ++rlt_ext;
+        dst.acc(g.v, e.p, tail_pack(j, e.u), e.a + add_new);
+      }
+    for (const Grp& g : F.Glt[j - 1].grps)
+      for (const Ent& e : g.ents) {
+        ++rlt_ext;
+        int s, uu;
+        tail_unpack(e.u, s, uu);
+        dst.acc(g.v, e.p, e.u, e.a + tail_extend(s, j));
+      }
+    if (rlt_beam > 0) l2r_prune_tail(F, dst, j);
+    size_t tot = 0;
+    for (const Grp& g : dst.grps) tot += g.ents.size();
+    const int fam = F.isU ? 1 : 0;
+    if (rlt_pos[fam].size() != static_cast<size_t>(n)) rlt_pos[fam].assign(n, 0);
+    rlt_pos[fam][j] = static_cast<int>(tot);
+    rlt_kept_f[fam] += static_cast<long long>(tot);
+    rlt_max_f[fam] = std::max(rlt_max_f[fam], static_cast<int>(tot));
+    rlt_kept += static_cast<long long>(tot);
+    rlt_max = std::max(rlt_max, static_cast<int>(tot));
+  }
+  // Adjoint of l2r_tail(j): Glt[j] back into Gls[j-1] (new one-base runs) and Glt[j-1].
+  void l2r_tail_back(LFam& F, int j) {
+    if (!rlt || j < 1) return;
+    const double add_new = tail_extend(j, j);
+    for (Grp& g : F.Glt[j].grps)
+      for (Ent& e : g.ents) {
+        if (e.b < HALF_NEG) continue;
+        int s, uu;
+        tail_unpack(e.u, s, uu);
+        Tab4& src_tab = s == j ? F.Gls[j - 1] : F.Glt[j - 1];
+        Grp* src = src_tab.get(g.v);
+        if (!src) continue;
+        const uint64_t key = s == j ? key2(e.p, uu) : key2(e.p, e.u);
+        auto it = src->idx.find(key);
+        if (it == src->idx.end()) continue;
+        add4(src->ents[it->second], e.b + (s == j ? add_new : tail_extend(s, j)));
+      }
+  }
+  // Case (f) from the tail at j-1, the empty run on Rls/Rlss at j-1, and Rlss for runs 1..cap.
+  // Rlss is not copied into the tail, so a seed derivation is closed once.
+  void l2r_close_tails(LFam& F, int j, int tg) {
+    const int o = F.isU ? 4 : 0;
+    ext_slot = (F.isU ? 4 : 0) + 1;
+    auto close = [&](Grp& g, Ent& s, int uu, double w_pre) {
+      const int i = s.p - 1;
+      const int lo = F.isU ? g.v : 0;
+      if (i < lo || !E.pairs(i, j) || !E.end_ok(i, j)) return;
+      if (!F.isU && !l2r_arm(uu, g.v, j)) return;
+      ledge(F.G[j], tg, g.v, i, uu, s, w_pre + E.at(i, j));
+    };
+    if (j < 1) return;
+    lchk(LT_ALS + o, j - 1);
+    const double w_empty = (E.w_ap + E.w_bp) + pair_bonus;
+    for (Grp& g : F.Glt[j - 1].grps)
+      for (Ent& s : g.ents) {
+        int run_s, uu;
+        tail_unpack(s.u, run_s, uu);
+        (void)run_s;
+        close(g, s, uu, w_empty);
+      }
+    for (int src = 0; src < 2; ++src)
+      for (Grp& g : (src ? F.Glss[j - 1] : F.Gls[j - 1]).grps)
+        for (Ent& s : g.ents) close(g, s, s.u, w_empty);
+    const int flo = std::max(0, j - 1 - cap);
+    for (int f = flo; f < j - 1; ++f) {
+      lchk(LT_ALS + o, f);
+      const int unpaired = j - f - 1;
+      double w_ext = E.w_ap + E.w_bp + E.w_cp * unpaired + pair_bonus;
+      if (dz) w_ext += E.run(f + 1, j - 1);
+      for (Grp& g : F.Glss[f].grps)
+        for (Ent& s : g.ents) close(g, s, s.u, w_ext);
+    }
+  }
   // New outer pairs i.j of family F (fill_Qg (b), (f), (g), (h); (a) = (b) on the seeds Gs).
   // B: every new left end >= the reserved xs (group key).
   void l2r_grow(LFam& F, int j) {
@@ -11167,6 +12905,8 @@ class DP03 {
     Tab4& G = F.G[j];
     const int tg = LT_AG + o;
     auto alive = [&](const Grp& g, const Ent& s) { return F.isU || l2r_arm(s.u, g.v, j); };
+    const int base = F.isU ? 4 : 0;
+    ext_slot = base;
     for (int f = std::max(0, j - 1 - cap); f < j; ++f) {
       lchk(LT_AG + o, f);
       lchk(LT_AGS + o, f);
@@ -11176,40 +12916,69 @@ class DP03 {
           for (Ent& s : g.ents) {
             if (!alive(g, s)) continue;
             const int c = s.p;
-            for (int i = std::max(lo, c - 1 - cap); i < c; ++i) {
-              if (!E.pairs(i, j)) continue;
+            const int iu = F.isU ? 1 : 0;
+            const int i0 = std::max(lo, c - 1 - cap);
+            auto take = [&](int i) {
               const double w = E.stem_interior(i, c, f, j);
-              if (w < HALF_NEG) continue;
+              if (w < HALF_NEG) return;
               ledge(G, tg, g.v, i, s.u, s, w + pair_bonus);
+            };
+            if (next_pair) {
+              const std::vector<int>& pl = partners_left[static_cast<size_t>(j)];
+              for (auto it = std::lower_bound(pl.begin(), pl.end(), i0); it != pl.end() && *it < c;
+                   ++it) {
+                if (!l2r_adj) ++it_int[iu];
+                take(*it);
+              }
+            } else {
+              for (int i = i0; i < c; ++i) {
+                if (!l2r_adj) ++it_int[iu];
+                if (!E.pairs(i, j)) continue;
+                take(i);
+              }
             }
-          }
         }
+      }
     }
-    for (int f = 0; f < j; ++f) {
-      lchk(LT_ALS + o, f);
-      const int unpaired = j - f - 1;
-      double w_ext = E.w_ap + E.w_bp + E.w_cp * unpaired + pair_bonus;
-      if (dz) w_ext += E.run(f + 1, j - 1);
-      for (int src = 0; src < 2; ++src) {
-        if (src == 1 && unpaired > cap) continue;
-        for (Grp& g : (src ? F.Glss[f] : F.Gls[f]).grps) {
-          const int lo = F.isU ? g.v : 0;
-          for (Ent& s : g.ents) {
-            const int i = s.p - 1;
-            if (i < lo || !alive(g, s) || !E.pairs(i, j) || !E.end_ok(i, j)) continue;
-            ledge(G, tg, g.v, i, s.u, s, w_ext + E.at(i, j));
+    ext_slot = base + 1;
+    // --grammar simple: the multiloop is M1..M8, not cases (f)(g)(h) and not the tail.
+    if (grammar_simple) {
+      ext_slot = -1;
+      return;
+    }
+    if (rlt) {
+      l2r_close_tails(F, j, tg);
+    } else {
+      for (int f = 0; f < j; ++f) {
+        lchk(LT_ALS + o, f);
+        const int unpaired = j - f - 1;
+        double w_ext = E.w_ap + E.w_bp + E.w_cp * unpaired + pair_bonus;
+        if (dz) w_ext += E.run(f + 1, j - 1);
+        for (int src = 0; src < 2; ++src) {
+          if (src == 1 && unpaired > cap) continue;
+          for (Grp& g : (src ? F.Glss[f] : F.Gls[f]).grps) {
+            const int lo = F.isU ? g.v : 0;
+            for (Ent& s : g.ents) {
+              const int i = s.p - 1;
+              if (i < lo || !alive(g, s) || !E.pairs(i, j) || !E.end_ok(i, j)) continue;
+              ledge(G, tg, g.v, i, s.u, s, w_ext + E.at(i, j));
+            }
           }
         }
       }
     }
-    if (j < 1) return;
+    if (j < 1) {
+      ext_slot = -1;
+      return;
+    }
     lchk(LT_ARS + o, j - 1);
     for (Grp& g : F.Grs[j - 1].grps) {
       const int lo = F.isU ? g.v : 0;
       for (Ent& s : g.ents) {
         if (!alive(g, s)) continue;
         const int c = s.p;
-        for (int i = std::max(lo, c - 1 - cap); i < c; ++i) {
+        ext_slot = base + 2;
+        for (int i = std::max(lo, lead_i_lo(c)); i < c; ++i) {
           if (!E.pairs(i, j) || !E.end_ok(i, j)) continue;
           double w = E.w_ap + E.w_bp + E.w_cp * (c - i - 1) + E.at(i, j) + pair_bonus;
           if (dz) w += E.run(i + 1, c - 1);
@@ -11217,17 +12986,21 @@ class DP03 {
         }
         if (c - 1 < 0) continue;
         lchk(LT_QM, c - 1);
+        ext_slot = base + 3;
         const OMap& at = qmp_at(c - 1);
-        for (size_t r = 0; r < at.slots(); ++r) {
+        const int iu = F.isU ? 1 : 0;
+        qm_pair_slots(c - 1, j, [&](int r) {
+          if (!l2r_adj) ++it_h[iu];
           const int ii = at.keys[r];
-          if (ii < 0) continue;
+          if (ii < 0) return;
           const int outer = ii - 1;
-          if (outer < lo || outer >= c || !E.pairs(outer, j) || !E.end_ok(outer, j)) continue;
+          if (outer < lo || outer >= c || !E.pairs(outer, j) || !E.end_ok(outer, j)) return;
           ledge(G, tg, g.v, outer, s.u, s, E.w_ap + E.w_bp + E.at(outer, j) + pair_bonus, ii,
                 c - 1, at.vals[r]);
-        }
+        });
       }
     }
+    ext_slot = -1;
   }
 
   // Gls / Glss at j: Qm(i, c-1) left of a branch c.j (fill_Qgls; seeds from Gs).
@@ -11243,7 +13016,9 @@ class DP03 {
           lchk(LT_QM, c - 1);
           const double w = E.w_bp + E.at(c, j);
           const OMap& at = qmp_at(c - 1);
+          const int iu = F.isU ? 1 : 0;
           for (size_t r = 0; r < at.slots(); ++r) {
+            if (!l2r_adj) ++it_ls[iu];
             const int i = at.keys[r];
             if (i < lo) continue;
             ledge(out, LT_ALS + o, g.v, i, s.u, s, w, i, c - 1, at.vals[r]);
@@ -11259,7 +13034,9 @@ class DP03 {
     lchk(LT_QM, j);
     Tab4& out = F.Grs[j];
     const OMap& at = qmp_at(j);
+    const int iu = F.isU ? 1 : 0;
     for (size_t r = 0; r < at.slots(); ++r) {
+      if (!l2r_adj) ++it_rs[iu];
       const int p = at.keys[r];
       if (p < 1) continue;
       const int f = p - 1;
@@ -11458,7 +13235,9 @@ class DP03 {
           if (s > HALF_NEG) rk.emplace_back(pool[q].first + s, static_cast<int>(q));
           continue;
         }
+        sx_ksrc = 3;
         const double s = lsc_L(rn, r, 0);
+        sx_ksrc = 0;
         if (s > HALF_NEG) rk.emplace_back(pool[q].first + s + lkb_arm(a2, r), static_cast<int>(q));
       }
       if (ltr_f && a2 == ltr_a2 && j == ltr_c1) ltr_rank(a2, j, k0, rn, pool, rk);
@@ -11639,9 +13418,11 @@ class DP03 {
       for (const Grp& g : (src ? LA.Gs[j] : LA.G[j]).grps)
         for (const Ent& s : g.ents) {
           if (!E.end_ok(s.p, j)) continue;
+          if (grammar_simple && !single_stems && gs_seedA.count(key3(s.p, s.u, g.v))) continue;
           SSt& st = S.v[S.at(key3(s.p, s.u, g.v))];
           st.c = log_add(st.c, s.a + E.at(s.p, j));
           ++l2r_tr[LT_S];
+          if (grammar_simple) ++gs_phase;
         }
     }
   }
@@ -11657,7 +13438,13 @@ class DP03 {
       const uint64_t key = pv.keys[k];
       const int xp = k3c(key);
       if (!E.pairs(xp, j) || !E.end_ok(xp, j)) continue;
-      lacc(LB.Gs[j], LT_BGS, k3b(key), xp, k3a(key), f + E.w_stem + E.at(xp, j) + pair_bonus);
+      if (grammar_simple) {
+        lacc(LB.Gs[j], LT_BGS, k3b(key), xp, k3a(key), f + E.w_stem + E.at(xp, j) + pair_bonus);
+        gs_seedB.insert(key3(xp, k3a(key), k3b(key)));
+        ++gs_phase;
+      } else {
+        lacc(LB.Gs[j], LT_BGS, k3b(key), xp, k3a(key), f + E.w_stem + E.at(xp, j) + pair_bonus);
+      }
     }
   }
 
@@ -11683,7 +13470,9 @@ class DP03 {
         if (!E.end_ok(xs, j)) continue;
         for (const Ent& s : g.ents) {
           if (s.p != xs) continue;
+          if (grammar_simple && !single_stems && gs_seedB.count(key3(s.p, s.u, xs))) continue;
           const double val = s.a + E.at(xs, j);
+          if (grammar_simple) ++gs_phase;
           if (l2r_mode == 1) set_pair(Qp, Qp_at, s.u, j, val);
           else LQp[ix(s.u, j)] = log_add(LQp[ix(s.u, j)], val);
         }
@@ -11767,6 +13556,7 @@ class DP03 {
         SSt& s = cur.v[cur.at(key)];
         s.P = log_add(s.P, f + bw);
         ++l2r_tr[lt];
+        if (grammar_simple) ++gs_fill;
       }
     };
     const OMap& atb = Qb_at[j];
@@ -11807,6 +13597,7 @@ class DP03 {
           s.P = log_add(s.P, o.F + E.wu);
         }
         ++l2r_tr[lt];
+        if (grammar_simple) ++gs_fill;
       }
     }
     for (SSt& s : cur.v)
@@ -11844,6 +13635,7 @@ class DP03 {
       if (f < HALF_NEG || !lpa2(k3a(key), k3b(key), j)) continue;
       cur.v[cur.at(key)].F = f;
       ++l2r_tr[LT_P2];
+      if (grammar_simple) ++gs_fill;
     }
     lchk(LT_P1, j - 1);
     const SMap& p1 = LP1[j - 1];
@@ -11853,6 +13645,7 @@ class DP03 {
       if (f < HALF_NEG || !lpa2(a2, j, j)) continue;
       cur.v[cur.at(key3(a2, j, 0))].F = f;
       ++l2r_tr[LT_P2];
+      if (grammar_simple) ++gs_phase;
     }
   }
   void l2r_p3_step(int j) {
@@ -11866,6 +13659,7 @@ class DP03 {
       SSt& s = cur.v[cur.at(key3(a2, xs, j))];
       s.c = log_add(s.c, f);
       ++l2r_tr[LT_P3];
+      if (grammar_simple) ++gs_phase;
     }
     l2r_fext(LP3, LT_P3, j, [&](uint64_t key) { return lpa3(k3a(key), k3b(key), k3c(key), j); });
   }
@@ -11883,7 +13677,14 @@ class DP03 {
       ++lp_seed_checks;
       if (!l2r_pairable(a2, j)) continue;
       ++lp_seeds;
-      lacc(LA.Gs[j], LT_AGS, xp, a2, xs, (pair_bonus + E.w_stem + E.at(a2, j)) + f);
+      if (grammar_simple) {
+        // Seeds are their own 4-index type (Rs), beamed at b4, not mixed into R.
+        lacc(LA.Gs[j], LT_AGS, xp, a2, xs, (pair_bonus + E.w_stem + E.at(a2, j)) + f);
+        gs_seedA.insert(key3(a2, xs, xp));
+        ++gs_phase;
+      } else {
+        lacc(LA.Gs[j], LT_AGS, xp, a2, xs, (pair_bonus + E.w_stem + E.at(a2, j)) + f);
+      }
     }
   }
   // --l2r-inc-check on (unbeamed): every A seed at j against spawn's k0 F1 F2 from the Qz table.
@@ -11934,6 +13735,7 @@ class DP03 {
   std::unordered_map<uint64_t, int> lArm;
   std::vector<double> lYwS;
   long long l2r_pre[PT_N] = {}, l2r_kept[PT_N] = {}, l2r_kmax[PT_N] = {};
+  long long l2r_pos[PT_N] = {}, l2r_bind[PT_N] = {};
   // scored states (pruning steps only), scores of -inf, R / S scores with no V arm
   long long l2r_nsc[PT_N] = {}, l2r_ninf[PT_N] = {}, l2r_noarm[PT_N] = {};
   // --l2r-ninf-mass on: per table, the states a beam cut scores -inf: log sum of their inside
@@ -12137,6 +13939,18 @@ class DP03 {
       lam[a] = log_add(num[a], tw) - log_add(den[a], tw);
     }
   }
+  double lKx_sum(int r, int qp) const {
+    const StemEst& st = *stem_;
+    const int hi = prArmY0[r + 1];
+    double acc = NEG_INF;
+    for (int k = static_cast<int>(std::upper_bound(prYy.begin() + prArmY0[r], prYy.begin() + hi, qp) -
+                                  prYy.begin());
+         k < hi; ++k) {
+      const double z = st.Qzbar(qp + 1, prYy[k] - 1);
+      if (z > HALF_NEG && prYw[k] > HALF_NEG) acc = log_add(acc, z + prYw[k]);
+    }
+    return acc;
+  }
   double lKx(int r, int qp) {
     if (lKc_q != cur_j) {
       lKc.clear();
@@ -12145,22 +13959,38 @@ class DP03 {
     const uint64_t key = key2(qp, r);
     auto it = lKc.find(key);
     if (it != lKc.end()) return it->second;
-    const StemEst& st = *stem_;
-    const int hi = prArmY0[r + 1];
-    double acc = NEG_INF;
-    for (int k = static_cast<int>(std::upper_bound(prYy.begin() + prArmY0[r], prYy.begin() + hi, qp) -
-                                  prYy.begin());
-         k < hi; ++k) {
-      const double z = st.Qzbar(qp + 1, prYy[k] - 1);
-      if (z > HALF_NEG) acc = log_add(acc, z + prYw[k]);
-    }
+    const double acc = lKx_sum(r, qp);
     lKc.emplace(key, acc);
     return acc;
   }
+  // Persistent exact-sum memo for --k-exact-ub. Same key as --k-memo, value is lKx.
+  double lKx_memo(int r, int qp) {
+    ++lKx_calls;
+    const uint64_t key = key2(qp, r);
+    auto it = lKxM.find(key);
+    if (it != lKxM.end()) {
+      ++lKx_hits;
+      return it->second;
+    }
+    const double v = lKx_sum(r, qp);
+    lKxM.emplace(key, v);
+    return v;
+  }
   double lK(int r, int qp) {
     if (r < 0 || qp + 1 > n - 1) return NEG_INF;
+    if (sx_k_exact) return lKx_memo(r, qp);
     if (lsub_a) return lKx(r, qp);
-    return arm_phi(r, qp, pr_aq_sep ? stem_->Qzbar(0, qp) : 0.0);
+    if (!k_memo) return arm_phi(r, qp, pr_aq_sep ? stem_->Qzbar(0, qp) : 0.0);
+    ++lKm_calls;
+    const uint64_t key = key2(qp, r);
+    auto it = lKm.find(key);
+    if (it != lKm.end()) {
+      ++lKm_hits;
+      return it->second;
+    }
+    const double v = arm_phi(r, qp, pr_aq_sep ? stem_->Qzbar(0, qp) : 0.0);
+    lKm.emplace(key, v);
+    return v;
   }
   // --l2r-ctx on: the nested pre-pass's span context pr_ctx(c, ys) = e^beta1 C[c-1] Sbar[ys+1] +
   // e^beta1m Bml(c, ys) in place of the scores' exterior e^beta1 C[c-1] Sbar[ys+1], as one log
@@ -12215,13 +14045,25 @@ class DP03 {
     return it != lKbx.end() ? it->second : lKbx.emplace(key, lkbar(lWx[xs], c)).first->second;
   }
 
+  double scoreS_k(int r, int j) {
+    ++rfv_look_s;
+    const double k = lK(r, j);
+    if (k < HALF_NEG) {
+      ++rfv_miss_s;
+      const int mk = k_map_kind(r, j);
+      note_kind(vm_i, vm_ii, vm_iii, ST_S, mk);
+      note_kind(km_i, km_ii, km_iii, ST_S, mk);
+      if (mk == 2) miss_k(r, j, ST_S);
+    }
+    return k;
+  }
   double l2r_scoreS(uint64_t key, double f, int j) {
     if (f < HALF_NEG) return NEG_INF;
     const int a = k3a(key), xs = k3b(key), xp = k3c(key);
     if (!lsub_d && l2r_arm_fb) {
       const auto [r, fx] = larm_fb(xs, xp);
       if (r >= 0 && r != larm(xs, xp)) ++l2r_fb_hit;
-      const double k = lK(r, j);
+      const double k = scoreS_k(r, j);
       if (k < HALF_NEG) {
         ++l2r_fb_floor;
         return f + prefix_log(a) + kFbFloor;
@@ -12230,12 +14072,12 @@ class DP03 {
     }
     if (!lsub_d && !lLam.empty()) {
       const int r = larm(xs, xp);
-      return f + lK(r, j) + prefix_log(a) + (lsub_c ? lrho(a) : lkb_arm(a, r)) + lLam[a];
+      return f + scoreS_k(r, j) + prefix_log(a) + (lsub_c ? lrho(a) : lkb_arm(a, r)) + lLam[a];
     }
     if (!lsub_d) {
       const int r = larm(xs, xp);
       if (r < 0) ++l2r_noarm[PT_S];
-      return f + lK(r, j) + prefix_log(a) + (lsub_c ? lrho(a) : lkb_arm(a, r));
+      return f + scoreS_k(r, j) + prefix_log(a) + (lsub_c ? lrho(a) : lkb_arm(a, r));
     }
     const StemEst& st = *stem_;
     double acc = NEG_INF;
@@ -12552,6 +14394,9 @@ class DP03 {
     }
     if (k < 0 || h.v[k].empty()) {
       ++lp_miss[t][1];
+      const int hk = h_map_kind(a2, j);
+      note_kind(hm_i, hm_ii, hm_iii, t, hk);
+      if (hk == 2 && (t == ST_P3 || t == ST_S)) miss_take(2, t, a2, j, -1);
       return NEG_INF;
     }
     if (pt == PT_P3) {
@@ -12586,6 +14431,10 @@ class DP03 {
       }
       if (s < HALF_NEG) {
         ++lp_miss[t][2];
+        const int qp = hl.empty() ? j : hl.front().first;
+        const int mk = k_map_kind(arm, qp);
+        note_kind(km_i, km_ii, km_iii, t, mk);
+        if (mk == 2) miss_k(arm, qp, t);
         return NEG_INF;
       }
       if (lp_hex) return f + s + lkb_arm(a2, arm);
@@ -12678,6 +14527,93 @@ class DP03 {
                   pass_cpu - l2r_isec - bs - ps - l2r_csec);
     return b;
   }
+  static int pct_p99(const long long* h, int nbin) {
+    long long tot = 0;
+    for (int i = 0; i < nbin; ++i) tot += h[i];
+    if (tot <= 0) return -1;
+    const long long need = (tot * 99 + 99) / 100;
+    long long c = 0;
+    for (int i = 0; i < nbin; ++i) {
+      c += h[i];
+      if (c >= need) return i;
+    }
+    return nbin - 1;
+  }
+  void scan_ct_dump() const {
+    auto grp = [&](int a, int b, long long& pre, long long& kept, long long& mx, long long& bind,
+                   long long& pos, int& beam) {
+      pre = kept = mx = bind = pos = 0;
+      beam = ltb(a);
+      for (int t = a; t <= b; ++t) {
+        pre += l2r_pre[t];
+        kept += l2r_kept[t];
+        mx = std::max(mx, l2r_kmax[t]);
+        bind += l2r_bind[t];
+        pos += l2r_pos[t];
+      }
+    };
+    auto one = [&](const char* name, int a, int b) {
+      long long pre, kept, mx, bind, pos;
+      int beam;
+      grp(a, b, pre, kept, mx, bind, pos, beam);
+      const double per = pos > 0 ? static_cast<double>(pre) / static_cast<double>(pos) : 0.0;
+      std::fprintf(stderr,
+                   " %s beam %d pre %lld kept %lld max %lld bind %lld pos %lld cand_per_pos %.3f",
+                   name, beam, pre, kept, mx, bind, pos, per);
+    };
+    long long m_n = 0, m_sum = 0, list_n = 0, list_sum = 0;
+    for (int i = 0; i < 8; ++i) {
+      m_n += sx_m_h[i];
+      m_sum += static_cast<long long>(i) * sx_m_h[i];
+    }
+    for (int i = 0; i < 65; ++i) {
+      list_n += sx_list_h[i];
+      list_sum += static_cast<long long>(i) * sx_list_h[i];
+    }
+    const double k_per = sx_rkey_n > 0 ? static_cast<double>(sx_k_src[2]) / static_cast<double>(sx_rkey_n)
+                                       : 0.0;
+    long long rpre = 0;
+    for (int t = PT_R; t <= PT_RRS; ++t) rpre += l2r_pre[t];
+    const double rkey_per = rpre > 0 ? static_cast<double>(sx_rkey_n) / static_cast<double>(rpre) : 0.0;
+    std::fprintf(stderr, "[scan-ct] n %d", n);
+    one("P1", PT_P1, PT_P1);
+    one("P2", PT_P2, PT_P2);
+    one("P3", PT_P3, PT_P3);
+    one("R", PT_R, PT_RRS);
+    one("S", PT_S, PT_S);
+    one("U", PT_U, PT_URS);
+    std::fprintf(stderr,
+                 " rkey_calls %lld r_cand %lld rkey_per_cand %.6f k_rkey %lld k_per_rkey %.3f "
+                 "k_root %lld k_spawn %lld k_n %lld m_n %lld m_mean %.3f m_p99 %d "
+                 "qlist_n %lld qlist_mean %.3f qlist_p99 %d\n",
+                 sx_rkey_n, rpre, rkey_per, sx_k_src[2], k_per, sx_k_src[1], sx_k_src[3], sx_k_n,
+                 m_n, m_n > 0 ? static_cast<double>(m_sum) / static_cast<double>(m_n) : 0.0,
+                 pct_p99(sx_m_h, 8), list_n,
+                 list_n > 0 ? static_cast<double>(list_sum) / static_cast<double>(list_n) : 0.0,
+                 pct_p99(sx_list_h, 65));
+    if (k_memo) {
+      const double bytes =
+          static_cast<double>(lKm.size()) * static_cast<double>(sizeof(uint64_t) + sizeof(double)) +
+          static_cast<double>(lKm.bucket_count()) * static_cast<double>(sizeof(void*));
+      std::fprintf(stderr,
+                   "[k-memo] calls %lld hits %lld hit_rate %.6f entries %zu bytes %.0f k_s %.4f\n",
+                   lKm_calls, lKm_hits,
+                   lKm_calls > 0 ? static_cast<double>(lKm_hits) / static_cast<double>(lKm_calls) : 0.0,
+                   lKm.size(), bytes, sx_k_sec);
+    }
+    if (k_exact_ub || sx_k_exact) {
+      const double bytes = static_cast<double>(lKxM.size()) *
+                               static_cast<double>(sizeof(uint64_t) + sizeof(double)) +
+                           static_cast<double>(lKxM.bucket_count()) * static_cast<double>(sizeof(void*));
+      const double per = n > 0 ? static_cast<double>(sx_kx_sigma) / static_cast<double>(n) : 0.0;
+      std::fprintf(stderr,
+                   "[k-exact] sigma %lld per_pos %.3f kx_calls %lld kx_hits %lld hit_rate %.6f "
+                   "entries %zu bytes %.0f kx_s %.4f cols %lld mis %lld\n",
+                   sx_kx_sigma, per, lKx_calls, lKx_hits,
+                   lKx_calls > 0 ? static_cast<double>(lKx_hits) / static_cast<double>(lKx_calls) : 0.0,
+                   lKxM.size(), bytes, sx_kx_sec, k_exact_cols, k_exact_mis);
+    }
+  }
   void profile_dump(const char* sid, double wall, double qz_pre) const {
     if (!prof_on) return;
     auto bucket = [&](int a, int b) {
@@ -12723,6 +14659,15 @@ class DP03 {
                  "U %.4f S %.4f close %.4f rest %.4f over %.4f\n",
                  sid, wall, prof_qz_sec, pr_grow_sec, P1, P2, P3b - gH, Rb - gR, Ub, Sb, l2r_csec,
                  rest, over);
+    const double spawn = l2r_bsec[PT_RS];
+    const double ext = l2r_bsec[PT_R] + l2r_bsec[PT_U] + l2r_bsec[PT_S];
+    const double nest = l2r_bsec[PT_P1] + l2r_bsec[PT_P2] + l2r_bsec[PT_P3];
+    const double km = sx_k_n > 0 ? static_cast<double>(sx_m_sum) / static_cast<double>(sx_k_n) : 0.0;
+    std::fprintf(stderr,
+                 "[profile-s] %s spawn %.4f ext %.4f nest %.4f k %.4f k_n %lld k_m %.3f rkey %.4f "
+                 "per_nt %.6f\n",
+                 sid, spawn, ext, nest, sx_k_sec, sx_k_n, km, sx_rkey_sec,
+                 n > 0 ? wall / static_cast<double>(n) : 0.0);
   }
   // The pass-1 copy: every beam (nested tables and l2r) capped at B.
   void l2r_cap_beam(int B) {
@@ -12927,31 +14872,52 @@ class DP03 {
     return k < hi ? lYwS[k] : NEG_INF;
   }
   double lsc_L(const RN& r, int arm, int who) {
-    if (arm < 0) return NEG_INF;
+    const auto t0 = std::chrono::steady_clock::now();
+    auto done = [&](double s) {
+      const double dt = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+      if (sx_k_exact) sx_kx_sec += dt;
+      else sx_k_sec += dt;
+      return s;
+    };
+    if (arm < 0) return done(NEG_INF);
     double s = NEG_INF;
+    auto note = [&](int m, int list) {
+      if (sx_k_exact) return;
+      ++sx_k_n;
+      ++sx_k_src[sx_ksrc];
+      if (m >= 0 && m < 8) ++sx_m_h[m];
+      if (list >= 0) ++sx_list_h[std::min(list, 64)];
+    };
     if (g_ntr_K > 0) {
+      const int len = static_cast<int>(r.T[0].size());
       for (const auto& [qp, g] : r.T[0]) {
+        note(-1, len);
         const double k = lK(arm, qp);
         if (k > HALF_NEG) s = log_add(s, g + k);
       }
-      return s;
+      return done(s);
     }
     if (g_tr_K > 0) {
-      for (const auto& [qp, g] : rec_trunc(r, who).L) {
+      const auto& L = rec_trunc(r, who).L;
+      const int len = static_cast<int>(L.size());
+      for (const auto& [qp, g] : L) {
+        note(-1, len);
         const double k = lK(arm, qp);
         if (k > HALF_NEG) s = log_add(s, g + k);
       }
-      return s;
+      return done(s);
     }
     for (int m = 0; m <= g_ml_L && m < rnL; ++m) {
       const RV& a = r.L[m];
       for (size_t i = 0; i < a.v.size(); ++i) {
         if (a.v[i] <= 0.0) continue;
+        note(m, -1);
+        sx_m_sum += m;
         const double k = lK(arm, a.lo + static_cast<int>(i));
         if (k > HALF_NEG) s = log_add(s, a.mx + std::log(a.v[i]) + k);
       }
     }
-    return s;
+    return done(s);
   }
   double lsc_R(const RN& r, int xs) const {
     if (g_ntr_K > 0 && g_ntr_KR < 0) {
@@ -13118,6 +15084,7 @@ class DP03 {
     for (const Grp& g : t.grps) tot += g.ents.size();
     const size_t pre = tot;
     l2r_pre[pt] += static_cast<long long>(tot);
+    ++l2r_pos[pt];
     if (l2r_diag) {
       SecTimer tm(l2r_psec[pt]);
       std::vector<double> sc;
@@ -13130,6 +15097,7 @@ class DP03 {
       return;
     }
     const int b = ltb(pt);
+    if (b > 0 && pre > static_cast<size_t>(b)) ++l2r_bind[pt];
     if (b > 0 && tot > static_cast<size_t>(b)) {
       SecTimer tm(l2r_psec[pt]);
       std::vector<double> sc;
@@ -13141,6 +15109,18 @@ class DP03 {
         if (s < HALF_NEG) ++l2r_ninf[pt];
       std::vector<char> keep;
       keep_mask(sc, keep, b);
+      if (drops) {
+        static const char* pn[PT_N] = {"R", "Rs", "Rls", "Rlss", "Rrs", "U", "Us", "Uls", "Ulss",
+                                       "Urs", "S", "P1", "P2", "P3"};
+        std::vector<size_t> rk = score_ranks(sc);
+        size_t k = 0;
+        for (const Grp& g : t.grps)
+          for (const Ent& e : g.ents) {
+            if (!keep[k])
+              note_l2r_drop(pn[pt], j, g.v, e.p, e.u, g.v, j, rk[k], tot, sc[k]);
+            ++k;
+          }
+      }
       if (l2r_ninf_mass || l2r_keep_ninf) {
         size_t k = 0;
         for (const Grp& g : t.grps)
@@ -13148,6 +15128,11 @@ class DP03 {
             if (sc[k] < HALF_NEG) ninf_note(pt, j, ninf_key(g.v, e.u, e.p), e.a, keep[k]);
             ++k;
           }
+      }
+      if (g_beam_stats.f) {
+        static const char* pn[PT_N] = {"R", "Rs", "Rls", "Rlss", "Rrs", "U", "Us", "Uls", "Ulss",
+                                       "Urs", "S", "P1", "P2", "P3"};
+        g_beam_stats.log_prune_mask(pn[pt], j, sc, keep, b);
       }
       if (ltr_f) ltr_step4(t, pt, j, &sc, &keep, tot, b);
       filter_step(t, keep);
@@ -13212,8 +15197,10 @@ class DP03 {
     std::unique_ptr<SecTimer> ptm(lpf ? new SecTimer(lpf_prune_sec[pt]) : nullptr);
     size_t tot = m.keys.size();
     l2r_pre[pt] += static_cast<long long>(tot);
+    ++l2r_pos[pt];
     const int b = l2r_diag ? 0 : ltb(pt);
     const size_t pre = tot;
+    if (b > 0 && pre > static_cast<size_t>(b)) ++l2r_bind[pt];
     if (l2r_diag || (b > 0 && tot > static_cast<size_t>(b))) {
       SecTimer tm(l2r_psec[pt]);
       std::vector<double> sc(tot);
@@ -13233,9 +15220,24 @@ class DP03 {
       std::vector<char> keep;
       if (pt == PT_P3 && lp_split_a > 0) keep_split(m.keys, sc, keep);
       else keep_mask(sc, keep, b);
+      if (drops) {
+        static const char* pn[PT_N] = {"R", "Rs", "Rls", "Rlss", "Rrs", "U", "Us", "Uls", "Ulss",
+                                       "Urs", "S", "P1", "P2", "P3"};
+        std::vector<size_t> rk = score_ranks(sc);
+        for (size_t k = 0; k < tot; ++k) {
+          if (keep[k]) continue;
+          const uint64_t key = m.keys[k];
+          note_l2r_drop(pn[pt], j, -1, k3a(key), k3b(key), k3c(key), j, rk[k], tot, sc[k]);
+        }
+      }
       if (l2r_ninf_mass || l2r_keep_ninf)
         for (size_t k = 0; k < tot; ++k)
           if (sc[k] < HALF_NEG) ninf_note(pt, j, m.keys[k], m.v[k].F, keep[k]);
+      if (g_beam_stats.f) {
+        static const char* pn[PT_N] = {"R", "Rs", "Rls", "Rlss", "Rrs", "U", "Us", "Uls", "Ulss",
+                                       "Urs", "S", "P1", "P2", "P3"};
+        g_beam_stats.log_prune_mask(pn[pt], j, sc, keep, b);
+      }
       if (ltr_f && pt == PT_S)
         for (size_t k = 0; k < tot; ++k)
           if (ltr_match3(m.keys[k]))
@@ -13272,18 +15274,114 @@ class DP03 {
       if (on) d.prof_region = prev;
     }
   };
+  // Rank one R column by the exact gap sum. Every candidate gets sigma_ub from lK.
+  // Exact sigma (lKx, memoized) is computed in that order and stops once the next
+  // upper bound is below the current b-th exact score. exact <= ub carries the
+  // per-state additives, so the comparison is on the full score.
+  void l2r_pruneA_exact(Tab4& t, int pt, int kind, bool seed, int j) {
+    ProfReg reg(*this, 1);
+    std::unique_ptr<SecTimer> ptm(lpf ? new SecTimer(lpf_prune_sec[pt]) : nullptr);
+    size_t tot = 0;
+    for (const Grp& g : t.grps) tot += g.ents.size();
+    const size_t pre = tot;
+    l2r_pre[pt] += static_cast<long long>(tot);
+    ++l2r_pos[pt];
+    const int b = ltb(pt);
+    if (b > 0 && pre > static_cast<size_t>(b)) ++l2r_bind[pt];
+    if (!(b > 0 && tot > static_cast<size_t>(b))) {
+      if (ltr_f) ltr_step4(t, pt, j, nullptr, nullptr, tot, b);
+      if (lpf) lpf_prune_stat(pt, pre, tot, b, false);
+      l2r_kept[pt] += static_cast<long long>(tot);
+      l2r_kmax[pt] = std::max(l2r_kmax[pt], static_cast<long long>(tot));
+      return;
+    }
+    SecTimer tm(l2r_psec[pt]);
+    struct Ref {
+      const Grp* g;
+      const Ent* e;
+    };
+    std::vector<Ref> ref;
+    ref.reserve(tot);
+    for (const Grp& g : t.grps)
+      for (const Ent& e : g.ents) ref.push_back(Ref{&g, &e});
+    auto score = [&](const Ref& c, bool exact) {
+      if (kind != 0 && !exact) ++sx_rkey_n;
+      const RN& r =
+          kind == 0 ? rec_root(c.e->p, j, seed) : rec_key(kind == 1, c.e->p, kind == 1 && seed, j);
+      sx_ksrc = kind == 0 ? 1 : 2;
+      sx_k_exact = exact;
+      const int arm = larm(c.e->u, c.g->v);
+      if (!exact && arm < 0) ++l2r_noarm[pt];
+      const double s = lsc_L(r, arm, kind == 0 ? 0 : 1);
+      sx_k_exact = false;
+      sx_ksrc = 0;
+      if (!exact && g_mass_f && s > HALF_NEG)
+        g_mass_note(kind, seed ? 1 : 0, c.e->p, j, s);
+      return s > HALF_NEG ? c.e->a + s + lkb_arm(c.e->p, arm) : NEG_INF;
+    };
+    std::vector<double> ub(tot), ex(tot, NEG_INF);
+    std::vector<char> got(tot, 0);
+    for (size_t i = 0; i < tot; ++i) ub[i] = score(ref[i], false);
+    l2r_nsc[pt] += static_cast<long long>(tot);
+    for (double s : ub)
+      if (s < HALF_NEG) ++l2r_ninf[pt];
+    std::vector<int> ord(tot);
+    for (size_t i = 0; i < tot; ++i) ord[i] = static_cast<int>(i);
+    std::sort(ord.begin(), ord.end(), [&](int a, int c) { return ub[a] > ub[c]; });
+    std::priority_queue<double, std::vector<double>, std::greater<double>> heap;
+    for (int idx : ord) {
+      if (static_cast<int>(heap.size()) >= b && ub[idx] < heap.top()) break;
+      ex[idx] = score(ref[idx], true);
+      got[idx] = 1;
+      ++sx_kx_sigma;
+      if (static_cast<int>(heap.size()) < b) heap.push(ex[idx]);
+      else if (ex[idx] > heap.top()) {
+        heap.pop();
+        heap.push(ex[idx]);
+      }
+    }
+    std::vector<char> keep;
+    keep_mask(ex, keep, b);
+    if (k_exact_check) {
+      ++k_exact_cols;
+      std::vector<double> full(tot);
+      for (size_t i = 0; i < tot; ++i) full[i] = got[i] ? ex[i] : score(ref[i], true);
+      std::vector<char> keep2;
+      keep_mask(full, keep2, b);
+      if (keep != keep2) ++k_exact_mis;
+    }
+    if (l2r_ninf_mass || l2r_keep_ninf) {
+      for (size_t k = 0; k < tot; ++k)
+        if (ex[k] < HALF_NEG)
+          ninf_note(pt, j, ninf_key(ref[k].g->v, ref[k].e->u, ref[k].e->p), ref[k].e->a, keep[k]);
+    }
+    if (ltr_f) ltr_step4(t, pt, j, &ex, &keep, tot, b);
+    filter_step(t, keep);
+    tot = l2r_keep_ninf ? static_cast<size_t>(std::count(keep.begin(), keep.end(), 1))
+                        : static_cast<size_t>(b);
+    if (lpf) lpf_prune_stat(pt, pre, tot, b, true);
+    l2r_kept[pt] += static_cast<long long>(tot);
+    l2r_kmax[pt] = std::max(l2r_kmax[pt], static_cast<long long>(tot));
+  }
   void l2r_pruneA(Tab4& t, int pt, int kind, bool seed, int j) {
+    if (k_exact_ub && !l2r_diag && !l2r_arm_fb && !(lsub_e && kind == 0 && seed)) {
+      l2r_pruneA_exact(t, pt, kind, seed, j);
+      return;
+    }
     ProfReg reg(*this, 1);
     l2r_prune4(t, pt, [&](const Grp& g, const Ent& e) {
       if (lsub_e && kind == 0 && seed) {
         const double b = lors(e.u, g.v, e.p, j);
         return b > HALF_NEG ? e.a + b : NEG_INF;
       }
+      if (kind != 0) ++sx_rkey_n;
       const RN& r = kind == 0 ? rec_root(e.p, j, seed) : rec_key(kind == 1, e.p, kind == 1 && seed, j);
+      sx_ksrc = kind == 0 ? 1 : 2;
       if (l2r_arm_fb) {
         const auto [arm, fx] = larm_fb(e.u, g.v);
         if (arm >= 0 && arm != larm(e.u, g.v)) ++l2r_fb_hit;
         const double s = lsc_L(r, arm, kind == 0 ? 0 : 1);
+        sx_ksrc = 0;
         if (s < HALF_NEG) {
           ++l2r_fb_floor;
           return e.a + kFbFloor;
@@ -13293,6 +15391,7 @@ class DP03 {
       const int arm = larm(e.u, g.v);
       if (arm < 0) ++l2r_noarm[pt];
       const double s = lsc_L(r, arm, kind == 0 ? 0 : 1);
+      sx_ksrc = 0;
       if (g_mass_f && s > HALF_NEG) g_mass_note(kind, seed ? 1 : 0, e.p, j, s);
       return s > HALF_NEG ? e.a + s + lkb_arm(e.p, arm) : NEG_INF;
     }, j);
@@ -13472,7 +15571,254 @@ class DP03 {
   }
 
   // Pseudoknot part of step j (after the engine's Qg .. Qp in check mode).
+  // Qhat^Lead(x0, t): empty at x0 == t, else w_cp per base plus the dangle of the whole run.
+  // Beam b2 per column, key C(x0-1) + Lead. A dropped start is NEG_INF.
+  void l2r_lead(int t) {
+    LeadCol col;
+    col.w.assign(static_cast<size_t>(t) + 1, NEG_INF);
+    struct Cand {
+      int x0;
+      double w, k;
+    };
+    std::vector<Cand> cs;
+    cs.reserve(static_cast<size_t>(t) + 1);
+    for (int x0 = 0; x0 <= t; ++x0) {
+      if (!lead_gap_ok(t - x0)) continue;
+      double w = 0.0;
+      if (x0 < t) {
+        w = E.w_cp * (t - x0);
+        if (dz) w += E.run(x0 + 1, t);
+      }
+      cs.push_back(Cand{x0, w, prefix_log(x0) + w});
+    }
+    int b = tbeam[BT_QM];
+    if (b > 0 && static_cast<int>(cs.size()) > b) {
+      std::nth_element(cs.begin(), cs.begin() + b, cs.end(),
+                       [](const Cand& a, const Cand& c) { return a.k > c.k; });
+      cs.resize(static_cast<size_t>(b));
+    }
+    for (const Cand& c : cs) col.w[static_cast<size_t>(c.x0)] = c.w;
+    gs_lead += static_cast<long long>(cs.size());
+    gsLead[static_cast<size_t>(t)] = std::move(col);
+  }
+
+  // M1 and M4 from the stems kept at j. M3 records each M4 state as an M as well.
+  // M4's group key is the carried v. Unpaired bases inside Qhat^M are already in that table.
+  void l2r_simple_m4(LFam& F, int j) {
+    auto from = [&](const Tab4& tab) {
+      for (const Grp& g : tab.grps) {
+        const int lo = F.isU ? g.v + 1 : 1;
+        for (const Ent& s : g.ents) {
+          if (E.end_ok(s.p, j)) {
+            F.SM[j].acc(g.v, s.p, s.u, s.a + E.w_bp + E.at(s.p, j));
+            ++gs_m[0];
+          }
+          const int c = s.p;
+          if (c - 1 < 0 || !E.end_ok(c, j)) continue;
+          lchk(LT_QM, c - 1);
+          const double w = E.w_bp + E.at(c, j);
+          const OMap& at = qmp_at(c - 1);
+          for (size_t r = 0; r < at.slots(); ++r) {
+            const int i = at.keys[r];
+            if (i < lo) continue;
+            F.SM2[j].acc(g.v, i, s.u, s.a + w + at.vals[r]);
+            ++gs_m[3];
+          }
+        }
+      }
+    };
+    from(F.G[j]);
+    from(F.Gs[j]);
+    for (const Grp& g : F.SM2[j].grps) {
+      if (g.v >= n) continue;
+      for (const Ent& s : g.ents) {
+        F.SM[j].acc(g.v, s.p, s.u, s.a);
+        ++gs_m[2];
+      }
+    }
+  }
+
+  // M5: stem ended at f = p-1, nested segment p..j on its right. Group key is v + n.
+  void l2r_simple_m5(LFam& F, int j) {
+    lchk(LT_QM, j);
+    const OMap& at = qmp_at(j);
+    const int stem = F.isU ? LT_BG : LT_AG;
+    for (size_t r = 0; r < at.slots(); ++r) {
+      const int p = at.keys[r];
+      if (p < 1) continue;
+      const int f = p - 1;
+      const double qm = at.vals[r];
+      lchk(stem, f);
+      auto take = [&](const Tab4& tab) {
+        for (const Grp& g : tab.grps)
+          for (const Ent& s : g.ents) {
+            if (!E.end_ok(s.p, f)) continue;
+            if (!F.isU && !l2r_arm(s.u, g.v, j)) continue;
+            F.SM2[j].acc(g.v + n, s.p, s.u, s.a + E.w_bp + E.at(s.p, f) + qm);
+            ++gs_m[4];
+          }
+      };
+      take(F.G[f]);
+      take(F.Gs[f]);
+    }
+  }
+
+  // Closes into X at j. (f) is M6+M7+M8 from M4. (g) is M6+M8 from M5 through Lead.
+  // (h) is M5 plus a nested segment on the left. Survivors of the Multi beam are written.
+  void l2r_simple_close(LFam& F, int j) {
+    Tab4& Mu = F.SMulti[j];
+    const int tg = F.isU ? LT_BG : LT_AG;
+    for (int f = 0; f < j; ++f) {
+      const int unpaired = j - f - 1;
+      double w_ext = E.w_ap + E.w_bp + E.w_cp * unpaired + pair_bonus;
+      if (dz) w_ext += E.run(f + 1, j - 1);
+      for (const Grp& g : F.SM2[f].grps) {
+        if (g.v >= n) continue;
+        const int lo = F.isU ? g.v : 0;
+        for (const Ent& s : g.ents) {
+          const int i = s.p - 1;
+          if (i < lo || !E.pairs(i, j) || !E.end_ok(i, j)) continue;
+          if (!F.isU && !l2r_arm(s.u, g.v, j)) continue;
+          Mu.acc(g.v, i, s.u, s.a + w_ext + E.at(i, j));
+          ++gs_m[5];
+          gs_m[6] += unpaired;
+          ++gs_m[7];
+          if (unpaired > cap) ++gs_over;
+        }
+      }
+    }
+    if (j >= 1) {
+      for (const Grp& g : F.SM2[j - 1].grps) {
+        if (g.v < n) continue;
+        const int real_v = g.v - n;
+        const int lo = F.isU ? real_v : 0;
+        for (const Ent& s : g.ents) {
+          const int c = s.p;
+          if (!F.isU && !l2r_arm(s.u, real_v, j)) continue;
+          // Leading run is the same window as pass 1: p in [c - ml_lead_cap, c).
+          // ml_lead_cap 0 keeps every p. No Qhat^Lead table and no beam on the run.
+          {
+            const int i_lo = std::max(lo, lead_i_lo(c));
+            for (int i = i_lo; i < c; ++i) {
+              if (!E.pairs(i, j) || !E.end_ok(i, j)) continue;
+              const int gap = c - i - 1;
+              double lw = 0.0;
+              if (gap > 0) {
+                lw = E.w_cp * gap;
+                if (dz) lw += E.run(i + 1, c - 1);
+              }
+              Mu.acc(real_v, i, s.u, s.a + lw + E.w_ap + E.w_bp + E.at(i, j) + pair_bonus);
+              ++gs_m[5];
+              ++gs_m[7];
+              ++gs_lead;
+              if (gap > cap) ++gs_over;
+            }
+          }
+          if (c - 1 < 0) continue;
+          lchk(LT_QM, c - 1);
+          const OMap& at = qmp_at(c - 1);
+          qm_pair_slots(c - 1, j, [&](int r) {
+            const int ii = at.keys[r];
+            if (ii < 0) return;
+            const int outer = ii - 1;
+            if (outer < lo || outer >= c || !E.pairs(outer, j) || !E.end_ok(outer, j)) return;
+            Mu.acc(real_v, outer, s.u,
+                   at.vals[r] + s.a + E.w_ap + E.w_bp + E.at(outer, j) + pair_bonus);
+            ++gs_m[7];
+          });
+        }
+      }
+    }
+    l2r_prune_prefix(Mu, l2r_beam, F.isU ? 5 : 2);
+    for (const Grp& g : Mu.grps)
+      for (const Ent& s : g.ents) lacc(F.G[j], tg, g.v, s.p, s.u, s.a);
+  }
+
+  void l2r_simple_pk(int j) {
+    if (!l2r_inc) {
+      std::fprintf(stderr, "[grammar] simple needs --l2r-spawn inc\n");
+      std::abort();
+    }
+    if (l2r_beam > 0) stem_cache_step(j);
+    gs_seedA.clear();
+    gs_seedB.clear();
+    {
+      SecTimer t(l2r_bsec[PT_R]);
+      l2r_grow(LA, j);
+    }
+    {
+      SecTimer t(l2r_bsec[PT_RS]);
+      l2r_inc_seed(j);
+    }
+    l2r_pruneA(LA.Gs[j], PT_RS, 0, true, j);
+    l2r_simple_close(LA, j);
+    l2r_pruneA(LA.G[j], PT_R, 0, false, j);
+    l2r_done[LT_AG] = l2r_done[LT_AGS] = j;
+    l2r_simple_m4(LA, j);
+    {
+      SecTimer t(l2r_csec);
+      l2r_closeA(j);
+    }
+    l2r_done[LT_ALS] = j;
+    {
+      SecTimer t(l2r_bsec[PT_US]);
+      l2r_bseed(j);
+    }
+    l2r_pruneB(LB.Gs[j], PT_US, 0, true, j);
+    {
+      SecTimer t(l2r_bsec[PT_U]);
+      l2r_grow(LB, j);
+    }
+    l2r_simple_close(LB, j);
+    l2r_pruneB(LB.G[j], PT_U, 0, false, j);
+    l2r_done[LT_BG] = l2r_done[LT_BGS] = j;
+    l2r_simple_m4(LB, j);
+    l2r_done[LT_BLS] = j;
+    {
+      SecTimer t(l2r_csec);
+      l2r_closeB(j);
+    }
+  }
+
+  void l2r_simple_end(int j) {
+    {
+      SecTimer t(l2r_bsec[PT_S]);
+      l2r_sext(j);
+    }
+    l2r_pruneS(j);
+    l2r_done[LT_S] = j;
+    {
+      SecTimer t(l2r_bsec[PT_P1]);
+      l2r_p1_step(j);
+    }
+    l2r_pruneP(PT_P1, j);
+    l2r_done[LT_P1] = j;
+    {
+      SecTimer t(l2r_bsec[PT_P2]);
+      l2r_p2_step(j);
+    }
+    l2r_pruneP(PT_P2, j);
+    l2r_done[LT_P2] = j;
+    {
+      SecTimer t(l2r_bsec[PT_P3]);
+      l2r_p3_step(j);
+    }
+    l2r_pruneP(PT_P3, j);
+    l2r_done[LT_P3] = j;
+    l2r_simple_m5(LA, j);
+    l2r_simple_m5(LB, j);
+    l2r_prune_prefix(LA.SM[j], l2r_beam, 0);
+    l2r_prune_prefix(LB.SM[j], l2r_beam, 3);
+    l2r_prune_prefix(LA.SM2[j], l2r_beam, 1);
+    l2r_prune_prefix(LB.SM2[j], l2r_beam, 4);
+    l2r_done[LT_ARS] = l2r_done[LT_BRS] = j;
+  }
+
   void l2r_step_pk(int j) {
+    if (grammar_simple) {
+      l2r_simple_pk(j);
+      return;
+    }
     if (l2r_beam > 0) stem_cache_step(j);
     {
       SecTimer t(l2r_bsec[PT_R]);
@@ -13527,10 +15873,18 @@ class DP03 {
       SecTimer t(l2r_csec);
       l2r_closeB(j);
     }
+    if (rlt) {
+      l2r_tail(LA, j);
+      l2r_tail(LB, j);
+    }
   }
 
   // End of step j: S (needs Qb, Qp, Qz at j), then Grs (needs Qm(., j)).
   void l2r_step_end(int j) {
+    if (grammar_simple) {
+      l2r_simple_end(j);
+      return;
+    }
     {
       SecTimer t(l2r_bsec[PT_S]);
       l2r_sext(j);
@@ -13588,7 +15942,7 @@ class DP03 {
         s.bU2 = log_add(s.bU2, s.bF + E.d3w[j]);
       }
     }
-    auto branch = [&](int d, double qv, double bw, std::vector<double>& qb) {
+    auto branch = [&](int d, double qv, double bw, SpMat& qb) {
       if (d < 1) return;
       SMap& pv = T[d - 1];
       for (size_t k = 0; k < pv.keys.size(); ++k) {
@@ -13715,7 +16069,11 @@ class DP03 {
         const int xs = g.v;
         if (!E.end_ok(xs, j)) continue;
         for (Ent& s : g.ents)
-          if (s.p == xs) add4(s, (lsp_use >= 0 ? QpS[lsp_use] : Qp_b)[ix(s.u, j)] + E.at(xs, j));
+          if (s.p == xs) {
+            const double qpb = lsp_use >= 0 ? QpS[lsp_use][ix(s.u, j)]
+                                            : static_cast<double>(Qp_b[ix(s.u, j)]);
+            add4(s, qpb + E.at(xs, j));
+          }
       }
     }
   }
@@ -13733,6 +16091,10 @@ class DP03 {
   // At the engine's Qp adjoint (Qp outside at j final): close B, U side, B seeds, close A, R side.
   void l2r_back_pk(int j) {
     l2r_adj = true;
+    if (rlt) {
+      l2r_tail_back(LB, j);
+      l2r_tail_back(LA, j);
+    }
     l2r_closeB_back(j);
     l2r_ls(LB, j);
     l2r_grow(LB, j);
@@ -13756,6 +16118,45 @@ class DP03 {
   }
 
   // states per table: R, Rs, Rls, Rlss, Rrs, U, Us, Uls, Ulss, Urs, S
+  void log_nest(const char* tag) const {
+    auto oml = [](const std::vector<OMap>& v) {
+      long long e = 0;
+      for (const OMap& m : v) e += m.live;
+      return e;
+    };
+    const long long nn = static_cast<long long>(n) * n;
+    std::fprintf(stderr,
+                 "[nest] %s n %d dense %lld Qb %lld Qm %lld Qm2 %lld Qp %lld Qmp %lld Qz %lld "
+                 "qz_mb %.3f\n",
+                 tag, n, nn, oml(Qb_at), oml(Qm_at), oml(Qm2_at), oml(Qp_at), oml(Qmp_at),
+                 Qz.finite(), static_cast<double>(Qz.bytes()) / 1048576.0);
+  }
+
+  // pr_Mbar and pr_QbIn are built later, inside the principled pass. Time and size them
+  // here so the pass-1 peak above this call does not include the two dense copies.
+  void log_pr_side() const {
+    const auto t0 = std::chrono::steady_clock::now();
+    const std::vector<double> qbin = Qb.dense();
+    const double tq = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    const auto t1 = std::chrono::steady_clock::now();
+    std::vector<double> mb(static_cast<size_t>(n) * static_cast<size_t>(n), NEG_INF);
+    long long nz = 0;
+    for (int j = 0; j < n; ++j) {
+      const OMap& at = qmp_at(j);
+      for (size_t r = 0; r < at.slots(); ++r) {
+        const int i = at.keys[r];
+        if (i < 0) continue;
+        mb[static_cast<size_t>(i) * static_cast<size_t>(n) + static_cast<size_t>(j)] = at.vals[r];
+        ++nz;
+      }
+    }
+    const double tm = std::chrono::duration<double>(std::chrono::steady_clock::now() - t1).count();
+    std::fprintf(stderr,
+                 "[pr-side] qbin_s %.6f qbin_mb %.1f mbar_s %.6f mbar_mb %.1f mbar_nz %lld\n",
+                 tq, static_cast<double>(qbin.size()) * 8.0 / 1048576.0, tm,
+                 static_cast<double>(mb.size()) * 8.0 / 1048576.0, nz);
+  }
+
   std::vector<long long> l2r_states() const {
     std::vector<long long> c(11, 0);
     auto cnt = [](const std::vector<Tab4>& v) {
@@ -13792,7 +16193,7 @@ class DP03 {
     b += msz::vec(v);
     for (const OMap& m : v) {
       e += m.live;
-      b += msz::vec(m.keys) + msz::vec(m.vals) + msz::vec(m.pos);
+      b += msz::vec(m.keys) + msz::vec(m.vals) + m.pos.bytes();
     }
   }
   template <class M>
@@ -13835,17 +16236,20 @@ class DP03 {
   }
   void mem_items(std::vector<MemItem>& out, const std::string& pre, bool tabs, bool pk) const {
     if (tabs) {
-      long long e = msz::fin(Qz);
-      double b = 0.0;
-      for (const std::vector<double>* v : {&Qb, &Qm, &Qm2, &Qz, &Qp, &Qmp, &C}) b += msz::vec(*v);
+      long long e = Qz.finite();
+      double b = Qz.bytes() + msz::vec(C);
       for (int k = 0; k < 2; ++k) b += msz::vec(zP[k]) + msz::vec(zU1[k]) + msz::vec(zU2[k]);
       for (int r = 0; r < RS_N; ++r) b += msz::vec(runP[r]) + msz::vec(runU1[r]) + msz::vec(runU2[r]) + msz::vec(runW[r]);
       for (const std::vector<OMap>* v : {&Qb_at, &Qm_at, &Qm2_at, &Qp_at, &Qmp_at, &PKM_at}) omap_sz(*v, e, b);
       out.push_back({pre + "in", e, b});
       e = 0;
-      b = 0.0;
-      for (const std::vector<double>* v : {&Qb_b, &Qm_b, &Qm2_b, &Qz_b, &Qp_b, &C_b, &PKM_b, &Qmp_b, &QmC_b,
-                                           &Qm2C_b, &QpS[0], &QpS[1], &QpS[2]}) {
+      b = Qz_b.bytes() + msz::vec(C_b);
+      e += Qz_b.finite();
+      for (const SpMat* v : {&Qb_b, &Qm_b, &Qm2_b, &Qp_b, &PKM_b, &Qmp_b, &QmC_b, &Qm2C_b}) {
+        e += v->finite();
+        b += v->bytes();
+      }
+      for (const std::vector<double>* v : {&QpS[0], &QpS[1], &QpS[2]}) {
         e += msz::fin(*v);
         b += msz::vec(*v);
       }
@@ -13910,6 +16314,12 @@ class DP03 {
       b += msz::vec(m.keys) + msz::vec(m.v) + msz::umap(m.idx);
     }
     out.push_back({"l2r_tab", e, b});
+    if (rlt) {
+      e = 0;
+      b = 0.0;
+      for (const LFam* F : {&LA, &LB}) tab4_sz(F->Glt, e, b);
+      out.push_back({"l2r_tail", e, b});
+    }
     if (l2r_inc) {
       e = 0;
       b = 0.0;
@@ -14034,7 +16444,7 @@ class DP03 {
         for (const Ent& s : g.ents) {
           int c = s.p, d = s.u;
           double x = s.a;
-          int i_lo = std::max(0, c - 1 - cap);
+          int i_lo = lead_i_lo(c);
           for (int i = i_lo; i < c; ++i) {
             if (!E.pairs(i, j) || !E.end_ok(i, j)) continue;
             double w = x + E.w_ap + E.w_bp + E.w_cp * (c - i - 1) + E.at(i, j) + pair_bonus;
@@ -14054,14 +16464,14 @@ class DP03 {
           double x = s.a;
           if (c - 1 < 0) continue;
           const OMap& at = qmp_at(c - 1);
-          for (size_t r = 0; r < at.slots(); ++r) {
+          qm_pair_slots(c - 1, j, [&](int r) {
             int i = at.keys[r];
-            if (i < 0) continue;
+            if (i < 0) return;
             double qm = at.vals[r];
             int outer = i - 1;
             if (E.pairs(outer, j) && outer < c && E.end_ok(outer, j))
               G.acc(e, outer, d, qm + x + E.w_ap + E.w_bp + E.at(outer, j) + pair_bonus);
-          }
+          });
         }
       }
     }
@@ -14182,29 +16592,373 @@ class DP03 {
   }
 
   // ------------------------------------------------------------ two-index
-  void fill_Qb(int j) {
-    for (int i : partners_left[j]) {
-      double acc = E.hairpin(i, j);
-
-      int e_lo = std::max(i + MIN_PAIR, j - 1 - cap);
-      for (int e = e_lo; e < j; ++e) {
-        const OMap& at = Qb_at[e];
-        for (size_t r = 0; r < at.slots(); ++r) {
-          int d = at.keys[r];
-          if (d < 0) continue;
-          double qb = at.vals[r];
-          if (d <= i) continue;
-          if ((d - i - 1) + (j - e - 1) > cap) continue;
-          double w = E.interior(i, d, e, j);
+  // Next index strictly after `after` that pairs with i, or -1. O(1) when the
+  // base-type successor is a real pair; a restricted pair list may skip a few.
+  void lp_build_mates() {
+    if (mates_ready) return;
+    mates_ready = true;
+    for (int b = 0; b < 4; ++b) {
+      mate_after[b].assign(static_cast<size_t>(n), -1);
+      int nxt = -1;
+      for (int j = n - 1; j >= 0; --j) {
+        mate_after[b][static_cast<size_t>(j)] = nxt;
+        const int c = E.code[j];
+        const int t = c < 0 ? -1 : pair_type(b, c);
+        if (t >= 0 && (allow_gu || (t != 3 && t != 5))) nxt = j;
+      }
+    }
+  }
+  int next_mate(int i, int after) const {
+    if (i < 0 || after >= n - 1) return -1;
+    const int b = E.code[i];
+    if (b < 0) return -1;
+    int j = mate_after[b][static_cast<size_t>(after)];
+    while (j != -1 && !E.pairs(i, j)) j = j + 1 < n ? mate_after[b][static_cast<size_t>(j)] : -1;
+    return j;
+  }
+  double unpaired_gap(int s, int t) const {
+    if (t < s) return 0.0;
+    return E.w_alpha3 * static_cast<double>(t - s + 1) + (dz ? E.run(s, t) : 0.0);
+  }
+  // Closing-pair left end for a first branch at `branch` (unpaired = branch - left - 1).
+  int lead_i_lo(int branch) const {
+    if (ml_lead_cap <= 0) return 0;
+    return std::max(0, branch - ml_lead_cap);
+  }
+  // Qm-start form: unpaired bases from `start` up to but not including the branch.
+  int lead_qm_lo(int branch) const {
+    if (ml_lead_cap <= 0) return 0;
+    return std::max(0, branch - (ml_lead_cap - 1));
+  }
+  bool lead_gap_ok(int gap) const {
+    return ml_lead_cap <= 0 || gap <= ml_lead_cap - 1;
+  }
+  int lead_span() const { return ml_lead_cap <= 0 ? n + 1 : ml_lead_cap; }
+  // Lazy left unpaired run. Off: the old window of `cap` bases (x-1-cap). On
+  // (--lazy-ml-cap): the pass-2 leading run, i >= branch - ml_lead_cap.
+  int ml_run_lo(int branch) const {
+    return lazy_ml_cap ? lead_i_lo(branch) : std::max(0, branch - 1 - cap);
+  }
+  bool ml_run_ok(int gap) const {
+    return lazy_ml_cap ? lead_gap_ok(gap) : gap <= cap;
+  }
+  void lp_beam(OMap& at) {
+    const int B = tbeam[BT_QB];
+    if (B <= 0 || at.live <= B) return;
+    std::vector<std::pair<double, int>> ranked;
+    ranked.reserve(static_cast<size_t>(at.live));
+    for (size_t r = 0; r < at.slots(); ++r) {
+      const int i = at.keys[r];
+      if (i < 0) continue;
+      const double s = pre_key_inside ? at.vals[r] : prefix_log(i) + at.vals[r];
+      ranked.emplace_back(s, i);
+    }
+    std::sort(ranked.begin(), ranked.end(), [](const std::pair<double, int>& a, const std::pair<double, int>& b) {
+      if (a.first != b.first) return a.first > b.first;
+      return a.second > b.second;
+    });
+    std::vector<char> keep(static_cast<size_t>(n), 0);
+    const int keep_n = std::min(B, static_cast<int>(ranked.size()));
+    for (int k = 0; k < keep_n; ++k) keep[static_cast<size_t>(ranked[k].second)] = 1;
+    for (size_t r = 0; r < at.slots(); ++r) {
+      const int i = at.keys[r];
+      if (i < 0 || keep[static_cast<size_t>(i)]) continue;
+      at.erase(i);
+    }
+    at.compact();
+  }
+  // Right-run class. Length >= 2 shares one class: its extension delta is
+  // d3[new] - d3[old], independent of the start. Empty and one base do not.
+  int lp_kind(int gap) const {
+    if (gap <= 0) return 0;
+    if (!dz) return 1;
+    return gap == 1 ? 1 : 2;
+  }
+  // One next-mate step of the right run. nk is the class at qn.
+  bool lp_step(int p, int q, int kind, int& qn, int& nk, double& delta) const {
+    qn = next_mate(p, q);
+    if (qn < 0) return false;
+    const int add = qn - q;
+    if (add <= 0) return false;
+    delta = E.w_alpha3 * static_cast<double>(add);
+    if (!dz) {
+      nk = 1;
+      return true;
+    }
+    if (kind == 0) {
+      nk = add == 1 ? 1 : 2;
+      delta += E.run(q, qn - 1);
+    } else if (kind == 1) {
+      nk = 2;
+      delta += E.run(q - 1, qn - 1) - E.s1w[q - 1];
+    } else {
+      nk = 2;
+      delta += E.d3w[qn - 1] - E.d3w[q - 1];
+    }
+    return true;
+  }
+  void mu_add(int q, int p, int kind, double w) {
+    if (q < 0 || q >= n || p < 0 || w < HALF_NEG) return;
+    if (lpM.empty()) lpM.assign(static_cast<size_t>(n), {});
+    OMap& col = lpM[static_cast<size_t>(q)];
+    const int k = p * 3 + kind;
+    const double cur = col.get(k);
+    col.set(k, cur < HALF_NEG ? w : log_add(cur, w));
+  }
+  // Beam a Multi column. The key is p*3+kind; the prefix is C[p-1].
+  void lp_beam_multi(OMap& at) {
+    const int B = tbeam[BT_QB];
+    if (B <= 0 || at.live <= B) return;
+    struct R {
+      double s;
+      int k, p, kind;
+    };
+    std::vector<R> ranked;
+    ranked.reserve(static_cast<size_t>(at.live));
+    for (size_t r = 0; r < at.slots(); ++r) {
+      const int k = at.keys[r];
+      if (k < 0) continue;
+      const int p = k / 3;
+      const double s = pre_key_inside ? at.vals[r] : prefix_log(p) + at.vals[r];
+      ranked.push_back({s, k, p, k % 3});
+    }
+    std::sort(ranked.begin(), ranked.end(), [](const R& a, const R& b) {
+      if (a.s != b.s) return a.s > b.s;
+      if (a.p != b.p) return a.p > b.p;
+      return a.kind > b.kind;
+    });
+    std::vector<int> drop;
+    for (size_t i = static_cast<size_t>(std::min(B, static_cast<int>(ranked.size())));
+         i < ranked.size(); ++i)
+      drop.push_back(ranked[i].k);
+    for (int k : drop) at.erase(k);
+    at.compact();
+  }
+  // Prune H[j], seed H(j, first mate), extend only the kept hairpins, then free H[j].
+  void lp_fill_qb(int j) {
+    lp_build_mates();
+    if (lpH.empty()) lpH.assign(static_cast<size_t>(n), {});
+    if (lpM.empty()) lpM.assign(static_cast<size_t>(n), {});
+    OMap& col = lpH[static_cast<size_t>(j)];
+    lp_beam(col);
+    const auto th = std::chrono::steady_clock::now();
+    const int q0 = next_mate(j, j);
+    if (q0 >= 0) {
+      const double h0 = E.hairpin(j, q0);
+      if (h0 > HALF_NEG) lpH[static_cast<size_t>(q0)].set(j, h0);
+    }
+    for (size_t r = 0; r < col.slots(); ++r) {
+      const int i = col.keys[r];
+      if (i < 0) continue;
+      ++r_hair;
+      set_pair(Qb, Qb_at, i, j, col.vals[r]);
+      const int q = next_mate(i, j);
+      if (q >= 0) {
+        const double h = E.hairpin(i, q);
+        if (h > HALF_NEG) lpH[static_cast<size_t>(q)].set(i, h);
+      }
+    }
+    sec_hair += std::chrono::duration<double>(std::chrono::steady_clock::now() - th).count();
+    col.init(0);
+    const auto tc = std::chrono::steady_clock::now();
+    lp_close_col(j);
+    sec_mclose += std::chrono::duration<double>(std::chrono::steady_clock::now() - tc).count();
+    // pair_bonus is one add on the finished pair sum (hairpin + interior + close),
+    // the same place as set_pair(acc + pair_bonus) in the scan fill.
+    if (pair_bonus != 0.0) {
+      OMap& qb = Qb_at[j];
+      for (size_t r = 0; r < qb.slots(); ++r) {
+        const int i = qb.keys[r];
+        if (i < 0) continue;
+        const double v = qb.vals[r] + pair_bonus;
+        qb.vals[r] = v;
+        Qb[ix(i, j)] = v;
+      }
+    }
+  }
+  // Kept Multi(p, j) closes into Qb(p, j), then steps to the next mate.
+  // The column that remains is the beam output; discarded arrivals are erased.
+  void lp_close_col(int j) {
+    if (lpM.empty()) return;
+    OMap& col = lpM[static_cast<size_t>(j)];
+    lp_beam_multi(col);
+    const double base = E.w_alpha1 + E.w_alpha2;
+    for (size_t r = 0; r < col.slots(); ++r) {
+      const int k = col.keys[r];
+      if (k < 0) continue;
+      const int p = k / 3;
+      const int kind = k % 3;
+      const double w = col.vals[r];
+      if (E.end_ok(p, j)) set_pair(Qb, Qb_at, p, j, w + base + E.at_close(p, j));
+      int qn, nk;
+      double delta;
+      if (lp_step(p, j, kind, qn, nk, delta)) mu_add(qn, p, nk, w + delta);
+    }
+  }
+  // From each kept pair, the outer pair sits inside the loop cap. Push it forward.
+  // Same shape as LinearPartition handleP's internal/stack loop, with max_loop as the cap.
+  void lp_push_interior(int j) {
+    const auto ti = std::chrono::steady_clock::now();
+    lp_build_mates();
+    const OMap& at = Qb_at[j];
+    for (size_t r = 0; r < at.slots(); ++r) {
+      const int i = at.keys[r];
+      if (i < 0) continue;
+      const double qb = at.vals[r];
+      if (qb < HALF_NEG) continue;
+      const int p_lo = std::max(0, i - 1 - cap);
+      for (int p = i - 1; p >= p_lo; --p) {
+        const int l1 = i - p - 1;
+        const int budget = cap - l1;
+        if (budget < 0) break;
+        for (int q = next_mate(p, j); q != -1 && q - j - 1 <= budget; q = next_mate(p, q)) {
+          ++r_int;
+          const double w = E.interior(p, i, j, q);
           if (w < HALF_NEG) continue;
+          set_pair(Qb, Qb_at, p, q, w + qb);
+        }
+      }
+    }
+    sec_int += std::chrono::duration<double>(std::chrono::steady_clock::now() - ti).count();
+  }
+  // M2 that ends on a branch (lpP, no trailing run) emits Multi(p, next_mate(p, j)).
+  // The right run j+1..q-1 is on that edge. The leading run is p+1..ib-1, capped
+  // by ml_lead_cap. Arrivals at the same (p, q, kind) merge.
+  void lp_emit_multi(int j) {
+    if (lpP.empty() || j < 0 || j >= n) return;
+    const auto te = std::chrono::steady_clock::now();
+    lp_build_mates();
+    if (lpM.empty()) lpM.assign(static_cast<size_t>(n), {});
+    OMap& src = lpP[static_cast<size_t>(j)];
+    std::vector<int> drop;
+    for (size_t r = 0; r < src.slots(); ++r) {
+      const int i = src.keys[r];
+      if (i < 0) continue;
+      if (!Qm2_at[j].has(i)) drop.push_back(i);
+    }
+    for (int i : drop) src.erase(i);
+    src.compact();
+    const int L = lead_span();
+    for (size_t r = 0; r < src.slots(); ++r) {
+      const int ib = src.keys[r];
+      if (ib < 0) continue;
+      const double mv = src.vals[r];
+      if (mv < HALF_NEG) continue;
+      const int p_lo = std::max(0, ib - L);
+      for (int p = ib - 1; p >= p_lo; --p) {
+        const int q = next_mate(p, j);
+        if (q < 0) continue;
+        ++r_m2multi;
+        const int kind = lp_kind(q - j - 1);
+        const double w = mv + unpaired_gap(p + 1, ib - 1) + unpaired_gap(j + 1, q - 1);
+        mu_add(q, p, kind, w);
+      }
+    }
+    sec_emit += std::chrono::duration<double>(std::chrono::steady_clock::now() - te).count();
+  }
+
+  void lp_mb_add(int q, int k, double w) {
+    if (q < 0 || q >= n || w < HALF_NEG) return;
+    if (lpMb.empty()) lpMb.assign(static_cast<size_t>(n), {});
+    OMap& col = lpMb[static_cast<size_t>(q)];
+    const double cur = col.get(k);
+    col.set(k, cur < HALF_NEG ? w : log_add(cur, w));
+  }
+  // Outside of Multi(p, j): the closing pair, plus the jump to the next mate.
+  void lp_out_multi(int j) {
+    if (l2r_mode != 0 || lpM.empty() || j < 0 || j >= static_cast<int>(lpM.size())) return;
+    if (lpMb.empty()) lpMb.assign(static_cast<size_t>(n), {});
+    const OMap& col = lpM[static_cast<size_t>(j)];
+    for (size_t r = 0; r < col.slots(); ++r) {
+      const int k = col.keys[r];
+      if (k < 0) continue;
+      const int p = k / 3;
+      const int kind = k % 3;
+      if (E.end_ok(p, j)) {
+        const double bb = Qb_b[ix(p, j)];
+        if (bb > HALF_NEG)
+          lp_mb_add(j, k, bb + E.w_alpha1 + E.w_alpha2 + E.at_close(p, j));
+      }
+      int qn, nk;
+      double delta;
+      if (!lp_step(p, j, kind, qn, nk, delta)) continue;
+      const int kn = p * 3 + nk;
+      if (!lpM[static_cast<size_t>(qn)].has(kn)) continue;
+      const double cb = lpMb[static_cast<size_t>(qn)].get(kn);
+      if (cb > HALF_NEG) lp_mb_add(j, k, cb + delta);
+    }
+  }
+  // E3: Multi(p, q) -> M2(ib, j), q = next_mate(p, j). Qm2_b is already the
+  // branch-ending (P) outside, so this does not flow into the trailing run.
+  void lp_out_e3(int j) {
+    if (l2r_mode != 0 || lpP.empty() || lpM.empty() || lpMb.empty()) return;
+    if (j < 0 || j >= n) return;
+    const int L = lead_span();
+    const OMap& src = lpP[static_cast<size_t>(j)];
+    for (size_t r = 0; r < src.slots(); ++r) {
+      const int ib = src.keys[r];
+      if (ib < 0 || !Qm2_at[j].has(ib)) continue;
+      const int p_lo = std::max(0, ib - L);
+      for (int p = ib - 1; p >= p_lo; --p) {
+        const int q = next_mate(p, j);
+        if (q < 0) continue;
+        const int k = p * 3 + lp_kind(q - j - 1);
+        if (q >= n || !lpM[static_cast<size_t>(q)].has(k)) continue;
+        const double mb = lpMb[static_cast<size_t>(q)].get(k);
+        if (mb < HALF_NEG) continue;
+        const double factor = unpaired_gap(p + 1, ib - 1) + unpaired_gap(j + 1, q - 1);
+        add2b(Qm2_b, ib, j, mb + factor);
+      }
+    }
+  }
+
+  void fill_Qb(int j) {
+    // Nested pass only. --pk-l2r off is Beam-DP03: hairpin, interior, Qm2, and PKM.
+    if (l2r_mode == 0 && !allow_pk) {
+      lp_fill_qb(j);
+      return;
+    }
+    // Interior spans are bounded by the loop cap, so the outer left end sits in a
+    // window of width cap next to a kept inner pair. Walk those kept pairs and the
+    // partners inside the window; do not walk every left partner of j.
+    if (static_cast<int>(qb_acc.size()) < n) qb_acc.assign(static_cast<size_t>(n), NEG_INF);
+    const std::vector<int>& pl = partners_left[j];
+    for (int i : pl) {
+      ++r_hair;
+      qb_acc[static_cast<size_t>(i)] = E.hairpin(i, j);
+    }
+    const int e0 = std::max(0, j - 1 - cap);
+    for (int e = e0; e < j; ++e) {
+      const int budget = cap - (j - e - 1);
+      const OMap& at = Qb_at[e];
+      for (size_t r = 0; r < at.slots(); ++r) {
+        const int d = at.keys[r];
+        if (d < 0) continue;
+        const double qb = at.vals[r];
+        const int i_hi = std::min(d - 1, e - MIN_PAIR);
+        const int i_lo = std::max(0, d - 1 - budget);
+        if (i_lo > i_hi) continue;
+        auto it = std::lower_bound(pl.begin(), pl.end(), i_lo);
+        const auto iend = std::upper_bound(it, pl.end(), i_hi);
+        for (; it != iend; ++it) {
+          ++r_int;
+          const int i = *it;
+          const double w = E.interior(i, d, e, j);
+          if (w < HALF_NEG) continue;
+          double& acc = qb_acc[static_cast<size_t>(i)];
           acc = log_add(acc, w + qb);
         }
       }
+    }
+    for (int i : pl) {
+      double acc = qb_acc[static_cast<size_t>(i)];
+      qb_acc[static_cast<size_t>(i)] = NEG_INF;
 
       const bool closing_ok = E.end_ok(i, j);
       const double at_ij = E.at_close(i, j);
 
       if (closing_ok && i + 1 <= j - 1) {
+        ++r_m2multi;
         double m2 = Qm2[ix(i + 1, j - 1)];
         if (m2 > HALF_NEG) acc = log_add(acc, m2 + E.w_alpha1 + E.w_alpha2 + at_ij);
       }
@@ -14231,29 +16985,90 @@ class DP03 {
     }
   }
 
+  void build_qlead(int t) {
+    if (qlead.empty()) qlead.assign(static_cast<size_t>(n), {});
+    const double w3 = E.w_alpha3;
+    std::vector<LeadEnt> cand;
+    if (t == 0) {
+      cand.push_back({0, 0.0});
+    } else {
+      cand.reserve(qlead[static_cast<size_t>(t - 1)].size() + 1);
+      for (const LeadEnt& e : qlead[static_cast<size_t>(t - 1)]) {
+        if (t - e.x0 > E.ml_left || !lead_gap_ok(t - e.x0)) continue;
+        double w = e.w + w3;
+        if (dz) w += E.run(e.x0, t - 1) - E.run(e.x0, t - 2);
+        cand.push_back({e.x0, w});
+      }
+      cand.push_back({t, 0.0});
+    }
+    const int B = p2_qz_beam;
+    if (B > 0 && static_cast<int>(cand.size()) > B) {
+      auto key = [&](const LeadEnt& e) {
+        return e.w + (e.x0 > 0 ? C[static_cast<size_t>(e.x0 - 1)] : 0.0);
+      };
+      std::nth_element(cand.begin(), cand.begin() + B, cand.end(), [&](const LeadEnt& a, const LeadEnt& b) {
+        const double ka = key(a), kb = key(b);
+        if (ka != kb) return ka > kb;
+        return a.x0 < b.x0;
+      });
+      cand.resize(static_cast<size_t>(B));
+    }
+    std::sort(cand.begin(), cand.end(), [](const LeadEnt& a, const LeadEnt& b) { return a.x0 < b.x0; });
+    qlead[static_cast<size_t>(t)] = std::move(cand);
+  }
+
   void add_branch(int j, int d, double obj, bool pk, double w_at) {
     const double w2 = E.w_alpha2;
-    const double w3 = E.w_alpha3;
     double w_single = obj + ((pk ? E.w_beta1m + E.ml_pk_k * w2 : w2) + w_at);
-    const int lo = std::max(0, d - E.ml_left);
-    if (dz) {
-      for (int i = lo; i <= d; ++i) set_Qm(i, j, w_single + w3 * (d - i) + E.run(i, d - 1), false);
+    int lead_lim = E.ml_left;
+    if (ml_lead_cap > 0 && ml_lead_cap - 1 < lead_lim) lead_lim = ml_lead_cap - 1;
+    const int lo = std::max(0, d - lead_lim);
+    if (l2r_mode == 0 && !allow_pk) {
+      // LinearPartition M = P: the fragment starts at the pair. Unpaired bases sit to its right.
+      const auto tm = std::chrono::steady_clock::now();
+      ++r_mp;
+      set_Qm(d, j, w_single, false);
+      sec_mp += std::chrono::duration<double>(std::chrono::steady_clock::now() - tm).count();
+    } else if (static_cast<int>(qlead.size()) == n) {
+      for (const LeadEnt& e : qlead[static_cast<size_t>(d)]) {
+        if (e.x0 < lo || e.x0 > d) continue;
+        ++r_mp;
+        set_Qm(e.x0, j, w_single + e.w, false);
+      }
     } else {
-      for (int i = lo; i <= d; ++i) set_Qm(i, j, w_single + w3 * (d - i), false);
+      const double w3 = E.w_alpha3;
+      for (int i = lo; i <= d; ++i) {
+        double w = w_single + w3 * (d - i);
+        if (dz && i < d) w += E.run(i, d - 1);
+        ++r_mp;
+        set_Qm(i, j, w, false);
+      }
     }
     if (d == 0) return;
     double w_more = obj + ((pk ? E.w_beta1m + E.ml_pk_k * w2 : w2) + w_at);
     const OMap& at = Qm_at[d - 1];
+    const auto tx = l2r_mode == 0 ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     for (size_t r = 0; r < at.slots(); ++r) {
       int i = at.keys[r];
       if (i < 0) continue;
-      set_Qm(i, j, at.vals[r] + w_more, !pk);
+      ++r_m2xp;
+      const double nv = at.vals[r] + w_more;
+      set_Qm(i, j, nv, !pk);
+      if (!pk && nv > HALF_NEG) {
+        if (lpP.empty()) lpP.assign(static_cast<size_t>(n), {});
+        OMap& pc = lpP[static_cast<size_t>(j)];
+        const double cur = pc.get(i);
+        pc.set(i, cur < HALF_NEG ? nv : log_add(cur, nv));
+      }
     }
+    if (l2r_mode == 0)
+      sec_m2xp += std::chrono::duration<double>(std::chrono::steady_clock::now() - tx).count();
   }
 
   void fill_Qm(int j) {
     const double w3 = E.w_alpha3;
     std::vector<int> surv, surv2;
+    const auto t_ext = std::chrono::steady_clock::now();
     if (dz) {
       RunSt& cu = rsQm[j & 1];
       RunSt& cu2 = rsQm2[j & 1];
@@ -14262,6 +17077,8 @@ class DP03 {
       if (j > 0) {
         surv = live_keys(Qm_at[j - 1]);
         surv2 = live_keys(Qm2_at[j - 1]);
+        r_mmu += static_cast<long long>(surv.size());
+        r_muext += static_cast<long long>(surv2.size());
         run_ext(rsQm[(j - 1) & 1], cu, surv, j, w3);
         run_ext(rsQm2[(j - 1) & 1], cu2, surv2, j, w3);
       }
@@ -14270,18 +17087,22 @@ class DP03 {
       for (size_t r = 0; r < at.slots(); ++r) {
         int i = at.keys[r];
         if (i < 0) continue;
+        ++r_mmu;
         set_Qm(i, j, at.vals[r] + w3, false);
       }
       const OMap& at2 = Qm2_at[j - 1];
       for (size_t r = 0; r < at2.slots(); ++r) {
         int i = at2.keys[r];
         if (i < 0) continue;
+        ++r_muext;
         double nv = at2.vals[r] + w3;
-        double& t = Qm2[ix(i, j)];
-        t = log_add(t, nv);
+        double t = log_add(static_cast<double>(Qm2[ix(i, j)]), nv);
+        Qm2[ix(i, j)] = t;
         Qm2_at[j].set(i, t);
       }
     }
+    sec_qm += std::chrono::duration<double>(std::chrono::steady_clock::now() - t_ext).count();
+    const auto t_br = std::chrono::steady_clock::now();
     {
       const OMap& at = Qb_at[j];
       for (size_t r = 0; r < at.slots(); ++r) {
@@ -14298,9 +17119,12 @@ class DP03 {
         add_branch(j, d, at.vals[r], true, 0.0);
       }
     }
+    sec_branch += std::chrono::duration<double>(std::chrono::steady_clock::now() - t_br).count();
     if (dz) {
+      const auto t_fin = std::chrono::steady_clock::now();
       run_fin(&Qm, Qm_at[j], rsQm[j & 1], surv, j);
       run_fin(&Qm2, Qm2_at[j], rsQm2[j & 1], surv2, j);
+      sec_qm += std::chrono::duration<double>(std::chrono::steady_clock::now() - t_fin).count();
     }
   }
 
@@ -14310,8 +17134,8 @@ class DP03 {
       rsQmp[j & 1].P.add(i, val);
       return;
     }
-    double& t = Qmp[ix(i, j)];
-    t = log_add(t, val);
+    double t = log_add(static_cast<double>(Qmp[ix(i, j)]), val);
+    Qmp[ix(i, j)] = t;
     Qmp_at[j].set(i, t);
   }
 
@@ -14319,10 +17143,11 @@ class DP03 {
     const double w2 = E.w_bp;
     const double w3 = E.w_cp;
     double w_single = obj + ((pk ? E.w_beta1m + E.ml_pk_k * w2 : w2) + w_at);
+    const int i_lo = lead_qm_lo(d);
     if (dz) {
-      for (int i = 0; i <= d; ++i) set_Qmp(i, j, w_single + w3 * (d - i) + E.run(i, d - 1));
+      for (int i = i_lo; i <= d; ++i) set_Qmp(i, j, w_single + w3 * (d - i) + E.run(i, d - 1));
     } else {
-      for (int i = 0; i <= d; ++i) set_Qmp(i, j, w_single + w3 * (d - i));
+      for (int i = i_lo; i <= d; ++i) set_Qmp(i, j, w_single + w3 * (d - i));
     }
     if (d == 0) return;
     const OMap& at = Qmp_at[d - 1];
@@ -14416,8 +17241,8 @@ class DP03 {
     }
   }
 
-  // Nested pre-pass only. Top b_z starts at this right end, by C(k-1) * Q^z(k, j).
-  // Dropped starts stay at NEG_INF, so the next column and outside() never read them.
+  // Every length. Top b2 starts at this right end, by C(k-1) + Q^z(k, j)
+  // (C_hat on the scan, C_pre on the pre-pass). Dropped starts stay absent.
   void fill_Qz_kept(int j) {
     if (qz_keep.empty()) qz_keep.assign(static_cast<size_t>(n), {});
     const int B = p2_qz_beam;
@@ -14488,11 +17313,24 @@ class DP03 {
       const double key = q + (k > 0 ? C[static_cast<size_t>(k - 1)] : 0.0);
       cs.push_back({k, q, dz ? a.acc : 0.0, a.u1, a.u2, key});
     }
+    qz_cand += static_cast<long long>(cs.size());
+    if (g_beam_stats.f) {
+      std::vector<double> keys;
+      keys.reserve(cs.size());
+      for (const Cand& c : cs) keys.push_back(c.key);
+      std::sort(keys.begin(), keys.end(), [](double a, double b) { return a > b; });
+      const size_t kept_n =
+          B > 0 && static_cast<int>(cs.size()) > B ? static_cast<size_t>(B) : keys.size();
+      const int full = B > 0 && static_cast<int>(cs.size()) > B ? 1 : 0;
+      g_beam_stats.log_prune("Qz", j, keys.size(), kept_n, BeamStats::mass_share(keys, kept_n),
+                             full);
+    }
     if (B > 0 && static_cast<int>(cs.size()) > B) {
       std::nth_element(cs.begin(), cs.begin() + B, cs.end(),
                        [](const Cand& a, const Cand& b) { return a.key > b.key; });
       cs.resize(static_cast<size_t>(B));
     }
+    qz_kept += static_cast<long long>(cs.size());
     std::sort(cs.begin(), cs.end(), [](const Cand& a, const Cand& b) { return a.k < b.k; });
     std::vector<QkEnt>& col = qz_keep[static_cast<size_t>(j)];
     col.clear();
@@ -14516,6 +17354,7 @@ class DP03 {
     for (size_t r = 0; r < atb.slots(); ++r) {
       int i = atb.keys[r];
       if (i < 0 || !E.end_ok(i, j)) continue;
+      ++r_extc;
       double left = (i == 0) ? 0.0 : C[i - 1];
       if (left > HALF_NEG) acc = log_add(acc, left + atb.vals[r] + E.at(i, j));
     }
@@ -14535,24 +17374,44 @@ class DP03 {
       acc = run_close(acc, u1, u2, E.s1w[j], E.d3w[j]);
     }
     C[j] = acc;
+    if (c_trace) {
+      double qb = NEG_INF, qp = NEG_INF;
+      const OMap& atb = Qb_at[j];
+      for (size_t r = 0; r < atb.slots(); ++r) {
+        int i = atb.keys[r];
+        if (i < 0 || !E.end_ok(i, j)) continue;
+        double left = (i == 0) ? 0.0 : C[i - 1];
+        if (left > HALF_NEG) qb = log_add(qb, left + atb.vals[r] + E.at(i, j));
+      }
+      if (allow_pk) {
+        const OMap& atp = Qp_at[j];
+        for (size_t r = 0; r < atp.slots(); ++r) {
+          int i = atp.keys[r];
+          if (i < 0) continue;
+          double left = (i == 0) ? 0.0 : C[i - 1];
+          if (left > HALF_NEG) qp = log_add(qp, left + atp.vals[r] + E.w_beta1);
+        }
+      }
+      std::fprintf(stderr, "[c] %d %.17g %.17g %.17g\n", j, C[j], qb, qp);
+    }
   }
 
   // ============================================================= outside
-  void add2b(std::vector<double>& t, int i, int j, double val) {
+  template <class T>
+  void add2b(T& t, int i, int j, double val) {
     if (val < HALF_NEG || i < 0 || j < 0) return;
-    double& x = t[ix(i, j)];
-    x = log_add(x, val);
+    const size_t k = ix(i, j);
+    t[k] = log_add(static_cast<double>(t[k]), val);
   }
 
   void alloc_beta() {
-    size_t nn = static_cast<size_t>(n) * n;
-    Qb_b.assign(nn, NEG_INF);
-    Qm_b.assign(nn, NEG_INF);
-    Qm2_b.assign(nn, NEG_INF);
-    if (E.stem_ml) Qmp_b.assign(nn, NEG_INF);
-    Qz_b.assign(nn, NEG_INF);
-    Qp_b.assign(nn, NEG_INF);
-    PKM_b.assign(allow_pk ? nn : 0, NEG_INF);
+    Qb_b.init(n);
+    Qm_b.init(n);
+    Qm2_b.init(n);
+    if (E.stem_ml) Qmp_b.init(n);
+    Qz_b.init(n);
+    Qp_b.init(n);
+    if (allow_pk) PKM_b.init(n);
     C_b.assign(n, NEG_INF);
     C_b[n - 1] = 0.0;
     if (dz) {
@@ -14576,8 +17435,8 @@ class DP03 {
     if (lsp_rec)
       for (auto& v : QpS) v.assign(static_cast<size_t>(n) * n, NEG_INF);
     if (keep_closed_b && dz) {
-      QmC_b.assign(static_cast<size_t>(n) * n, NEG_INF);
-      Qm2C_b.assign(static_cast<size_t>(n) * n, NEG_INF);
+      QmC_b.init(n);
+      Qm2C_b.init(n);
     }
     for (int j = n - 1; j >= 0; --j) {
       if (allow_pk && l2r_mode == 1) l2r_back_end(j);
@@ -14620,10 +17479,8 @@ class DP03 {
           add2b(Qp_b, d, j, pb);
           qps(1, d, j, pb);
         }
-        if (j > 0 && PKM_at[j - 1].has(d)) {
-          double& t = PKM_b[ix(j - 1, d)];
-          t = log_add(t, pb + w3);
-        }
+        if (j > 0 && PKM_at[j - 1].has(d))
+          PKM_b[ix(j - 1, d)] = log_add(static_cast<double>(PKM_b[ix(j - 1, d)]), pb + w3);
       }
     }
 
@@ -14674,10 +17531,30 @@ class DP03 {
       for (size_t r = 0; r < at.slots(); ++r) {
         int d = at.keys[r];
         if (d < 0) continue;
+        if (l2r_mode == 0) {
+          const int p_lo = std::max(0, d - 1 - cap);
+          for (int p = d - 1; p >= p_lo; --p) {
+            const int budget = cap - (d - p - 1);
+            if (budget < 0) break;
+            for (int q = next_mate(p, j); q != -1 && q - j - 1 <= budget; q = next_mate(p, q)) {
+              if (!Qb_at[q].has(p)) continue;
+              const double w = E.interior(p, d, j, q);
+              if (w < HALF_NEG) continue;
+              add2b(Qb_b, d, j, Qb_b[ix(p, q)] + w);
+            }
+          }
+          continue;
+        }
         for (int q = j + 1; q < jmax; ++q) {
-          for (int i : partners_left[q]) {
-            if (d <= i) continue;
-            if ((d - i - 1) + (q - j - 1) > cap) continue;
+          const int budget = cap - (q - j - 1);
+          const int i_hi = d - 1;
+          const int i_lo = std::max(0, d - 1 - budget);
+          if (i_lo > i_hi) continue;
+          const std::vector<int>& pl = partners_left[q];
+          auto it = std::lower_bound(pl.begin(), pl.end(), i_lo);
+          const auto iend = std::upper_bound(it, pl.end(), i_hi);
+          for (; it != iend; ++it) {
+            const int i = *it;
             double w = E.interior(i, d, j, q);
             if (w < HALF_NEG) continue;
             add2b(Qb_b, d, j, Qb_b[ix(i, q)] + w);
@@ -14730,7 +17607,7 @@ class DP03 {
         int e = g.v;
         for (Ent& s : g.ents) {
           int c = s.p, d = s.u;
-          int i_lo = std::max(0, c - 1 - cap);
+          int i_lo = lead_i_lo(c);
           for (int i = i_lo; i < c; ++i) {
             if (!E.pairs(i, q) || !E.end_ok(i, q)) continue;
             double w = E.w_ap + E.w_bp + E.w_cp * (c - i - 1) + E.at(i, q);
@@ -14740,19 +17617,19 @@ class DP03 {
           }
           if (c - 1 >= 0) {
             const OMap& at = qmp_at(c - 1);
-            for (size_t r = 0; r < at.slots(); ++r) {
+            qm_pair_slots(c - 1, q, [&](int r) {
               int ii = at.keys[r];
-              if (ii < 0) continue;
+              if (ii < 0) return;
               double qm = at.vals[r];
               int outer = ii - 1;
-              if (!E.pairs(outer, q) || outer >= c) continue;
-              if (!E.end_ok(outer, q)) continue;
+              if (!E.pairs(outer, q) || outer >= c) return;
+              if (!E.end_ok(outer, q)) return;
               double at_o = E.at(outer, q);
               double w = qm + E.w_ap + E.w_bp + at_o;
               double pb = g4(Qg[q], e, outer, d);
               add4(s, pb + w);
               add2b(qmp_b(), ii, c - 1, pb + s.a + E.w_ap + E.w_bp + at_o);
-            }
+            });
           }
         }
       }
@@ -14794,7 +17671,7 @@ class DP03 {
     // Qgrs = Qg[f] × Qm[f+1, j]
     if (allow_pk) {
       const OMap& at = qmp_at(j);
-      std::vector<double>& mpb = qmp_b();
+      SpMat& mpb = qmp_b();
       for (size_t r = 0; r < at.slots(); ++r) {
         int p = at.keys[r];
         if (p < 0) continue;
@@ -14832,16 +17709,24 @@ class DP03 {
       if (allow_pk && E.stem_ml) run_back_at(Qmp_b, Qmp_at[j], j, E.w_cp, rbQmp, RS_QMP);
     }
 
+    // Pass 1 E3 lands on the branch-ending outside, after the run split.
+    lp_out_e3(j);
+
     // Qm / Qm2 from Qb, Qp at this j
-    auto rev_branch = [&](int d, double obj_a, std::vector<double>& obj_beta, bool pk,
+    auto rev_branch = [&](int d, double obj_a, SpMat& obj_beta, bool pk,
                           double w_at) {
       double w_single_base = (pk ? E.w_beta1m + E.ml_pk_k * w2 : w2) + w_at;
       const OMap& amj = Qm_at[j];
       for (size_t r = 0; r < amj.slots(); ++r) {
         int i = amj.keys[r];
-        if (i < 0 || i > d || d - i > E.ml_left) continue;
-        double w = w_single_base + w3 * (d - i);
-        if (dz) w += E.run(i, d - 1);
+        if (i < 0 || i > d || d - i > E.ml_left || !lead_gap_ok(d - i)) continue;
+        double w = w_single_base;
+        if (l2r_mode == 0 && !allow_pk) {
+          if (i != d) continue;
+        } else {
+          w += w3 * (d - i);
+          if (dz) w += E.run(i, d - 1);
+        }
         double mb = Qm_b[ix(i, j)];
         add2b(obj_beta, d, j, mb + w);
         if (pk) qps(1, d, j, mb + w);
@@ -14884,13 +17769,13 @@ class DP03 {
     // Qmp from Qb, Qp at this j
     if (allow_pk && E.stem_ml) {
       const double bp = E.w_bp, cp = E.w_cp;
-      auto rev_branch_p = [&](int d, double obj_a, std::vector<double>& obj_beta, bool pk,
+      auto rev_branch_p = [&](int d, double obj_a, SpMat& obj_beta, bool pk,
                               double w_at) {
         double w_single = (pk ? E.w_beta1m + E.ml_pk_k * bp : bp) + w_at;
         const OMap& amj = Qmp_at[j];
         for (size_t r = 0; r < amj.slots(); ++r) {
           int i = amj.keys[r];
-          if (i < 0 || i > d) continue;
+          if (i < 0 || i > d || !lead_gap_ok(d - i)) continue;
           double mb = Qmp_b[ix(i, j)];
           if (dz) {
             add2b(obj_beta, d, j, mb + w_single + cp * (d - i) + E.run(i, d - 1));
@@ -14965,7 +17850,7 @@ class DP03 {
         if (i < 0 || !E.end_ok(i, j)) continue;
         double at_ij = E.at_close(i, j);
         double bb = Qb_b[ix(i, j)];
-        if (i + 1 <= j - 1) add2b(Qm2_b, i + 1, j - 1, bb + (w_ml + at_ij));
+        if (l2r_mode != 0 && i + 1 <= j - 1) add2b(Qm2_b, i + 1, j - 1, bb + (w_ml + at_ij));
         if (bb < HALF_NEG || !allow_pk || j < 1) continue;
         double wl = w_left + at_ij;
 
@@ -14974,20 +17859,22 @@ class DP03 {
           int d = pkm.keys[s];
           if (d <= i) continue;
           double pk = pkm.vals[s];
-          double& pkb = PKM_b[ix(j - 1, d)];
+          const size_t pkix = ix(j - 1, d);
           double v = bb + wl + w3 * (d - i - 1);
           if (dz) v += E.run(i + 1, d - 1);
-          pkb = log_add(pkb, v);
+          PKM_b[pkix] = log_add(static_cast<double>(PKM_b[pkix]), v);
           if (i + 1 <= d - 1) {
             double left = Qm[ix(i + 1, d - 1)];
             if (left > HALF_NEG) {
               add2b(Qm_b, i + 1, d - 1, bb + pk + wl);
-              pkb = log_add(pkb, bb + left + wl);
+              PKM_b[pkix] = log_add(static_cast<double>(PKM_b[pkix]), bb + left + wl);
             }
           }
         }
       }
     }
+
+    lp_out_multi(j);
 
     if (!allow_pk) return;
     if (l2r_mode == 1) l2r_back_pk(j);
@@ -15050,7 +17937,7 @@ class DP03 {
     }
 
     // Qgls = Qm × Qg
-    std::vector<double>& mpb = qmp_b();
+    SpMat& mpb = qmp_b();
     for (Grp& g : Qg[j].grps) {
       int e = g.v;
       for (Ent& s : g.ents) {
@@ -15293,7 +18180,7 @@ void DP03::dump_states(FILE* f, const std::string& id, double min_w) {
     }
     std::fprintf(f, "S %s %s %d %d %d %d %.9e\n", sid, BT_NAMES[bt], a, b, c, d, w);
   };
-  auto two = [&](int bt, const std::vector<OMap>& at, const std::vector<double>& beta, int rs) {
+  auto two = [&](int bt, const std::vector<OMap>& at, const SpMat& beta, int rs) {
     for (int j = 0; j < n; ++j)
       for (size_t r = 0; r < at[j].slots(); ++r) {
         int i = at[j].keys[r];
@@ -15381,7 +18268,7 @@ void DP03::dump_scores(FILE* f, const std::string& id, const StemEst& st, double
   }
 
   auto weight = [&](double lw) { return lw < HALF_NEG ? 0.0 : std::exp(lw - logZ); };
-  auto two = [&](int bt, const std::vector<OMap>& at, const std::vector<double>* beta, int rs,
+  auto two = [&](int bt, const std::vector<OMap>& at, const SpMat* beta, int rs,
                  bool pkm) {
     std::vector<std::pair<double, int>> ranked;
     std::vector<size_t> rank(n);
@@ -15667,7 +18554,7 @@ std::string normalize(const std::string& s) {
 
 void usage() {
   std::fprintf(stderr,
-               "usage: dp03_cpp [--beam B] [--loop-cap L] [--max-loop M] [--no-gu] [--rt RT] "
+               "usage: dp03_cpp [--beam B] [--loop-cap L] [--ml-lead-cap N|n] [--max-loop M] [--no-gu] [--rt RT] "
                "[--no-single-stems] [--wc-ends] "
                "[--score qz|prefix] [--no-pk] [--cutoff C] [--no-bpp] [--gap-beam group|step] "
                "[--params dp03|dp09|dp09st|dp09ml|dp09full] "
@@ -15678,6 +18565,7 @@ void usage() {
                "[--gate-role stem1|both] [--gate-tables qg|qgl|qg,qgl] [--gate-reserve K]] "
                "[--gate-stats] [--gate-diag PATH [--gate-diag-taus T1,T2,...] "
                "[--gate-long-span L]] "
+               "[--b2 N] [--b1 N] [--qzbar-old] [--pbeam-ratio a:b:c] "
                "[--beam-table T=B ...] [--dump-states PATH [--dump-min-w W]] "
                "[--dump-pruned PATH [--dump-exact PATH [--dump-pruned-min-w X]]] "
                "[--remove-state T,a,b,c,d ...] "
@@ -15772,7 +18660,7 @@ void DP03::tagged_outside(int tag) {
         int e = g.v;
         for (Ent& s : g.ents) {
           int c = s.p, d = s.u;
-          for (int i = std::max(0, c - 1 - cap); i < c; ++i) {
+          for (int i = lead_i_lo(c); i < c; ++i) {
             if (!E.pairs(i, q) || !E.end_ok(i, q)) continue;
             double w = E.w_ap + E.w_bp + E.w_cp * (c - i - 1) + E.at(i, q);
             if (dz) w += E.run(i + 1, c - 1);
@@ -15780,14 +18668,14 @@ void DP03::tagged_outside(int tag) {
           }
           if (c - 1 >= 0) {
             const OMap& at = qmp_at(c - 1);
-            for (size_t r = 0; r < at.slots(); ++r) {
+            qm_pair_slots(c - 1, q, [&](int r) {
               int ii = at.keys[r];
-              if (ii < 0) continue;
+              if (ii < 0) return;
               int outer = ii - 1;
-              if (!E.pairs(outer, q) || outer >= c || !E.end_ok(outer, q)) continue;
+              if (!E.pairs(outer, q) || outer >= c || !E.end_ok(outer, q)) return;
               double w = at.vals[r] + E.w_ap + E.w_bp + E.at(outer, q);
               add4(s, g4(Qg[q], e, outer, d) + w);
-            }
+            });
           }
         }
       }
@@ -15982,7 +18870,7 @@ void DP03::pr_build_hbar(const std::vector<char>& km, const std::vector<std::vec
         for (const Grp& g : rs.grps)
           for (const Ent& s : g.ents) {
             const int c = s.p, d = s.u;
-            for (int i = std::max(0, c - 1 - cap); i < c; ++i) {
+            for (int i = lead_i_lo(c); i < c; ++i) {
               if (!km[ix(i, j)] || !E.end_ok(i, j)) continue;
               double w = s.a + E.w_ap + E.w_bp + E.w_cp * (c - i - 1) + E.at(i, j) + pair_bonus;
               if (dz) w += E.run(i + 1, c - 1);
@@ -16101,7 +18989,7 @@ void DP03::pr_hybrid_outside(const PrVar& v, const StemEst& st, const std::vecto
             ow = log_add(ow, t + w);
             if (v.ml && km[ix(i, q)]) add4(s, t + w);
           };
-          for (int i = std::max(0, c - 1 - cap); i < c; ++i) {
+          for (int i = lead_i_lo(c); i < c; ++i) {
             if (!E.pairs(i, q) || !E.end_ok(i, q)) continue;
             double w = E.w_ap + E.w_bp + E.w_cp * (c - i - 1) + E.at(i, q) + pair_bonus;
             if (dz) w += E.run(i + 1, c - 1);
@@ -16788,6 +19676,12 @@ std::string DP03::stem_diag(const std::vector<const StemEst*>& ests, const std::
 
 // --l2r-p1 time split: process CPU seconds and peak RSS so far.
 static double cpu_sec() { return static_cast<double>(std::clock()) / CLOCKS_PER_SEC; }
+static double ru_cpu() {
+  struct rusage ru;
+  if (getrusage(RUSAGE_SELF, &ru) != 0) return 0.0;
+  return static_cast<double>(ru.ru_utime.tv_sec) + ru.ru_utime.tv_usec * 1e-6 +
+         static_cast<double>(ru.ru_stime.tv_sec) + ru.ru_stime.tv_usec * 1e-6;
+}
 static double hwm_mb() {
   std::ifstream f("/proc/self/status");
   std::string k;
@@ -16801,10 +19695,15 @@ static double hwm_mb() {
 }
 
 int main(int argc, char** argv) {
+  std::setvbuf(stderr, nullptr, _IOLBF, 0);
   std::signal(SIGXCPU, on_cpu_stop);
   std::signal(SIGUSR1, on_cpu_stop);
   int beam = 0;
   int loop_cap = MAX_LOOP;
+  // Temporary per-pass loop caps (--loop-cap-p1 / -p2 / -scan). -1 = use --loop-cap.
+  // 0 / off / n = uncapped (NO_CAP). Also drives max_loop for that pass.
+  constexpr int NO_LOOP_CAP = 1000000;
+  int loop_cap_p1 = -1, loop_cap_p2 = -1, loop_cap_scan = -1;
   bool score_qz = true;
   bool allow_pk = true;
   double cutoff = 1e-6;
@@ -16826,6 +19725,10 @@ int main(int argc, char** argv) {
   std::string l2r_tbeam;  // --l2r-tbeam NAME=B[,NAME=B..], B = 0 or inf: no beam
   std::string l2r_odump, l2r_oload, l2r_sub, l2r_trace, l2r_trace_key;
   bool l2r_perf = false;
+  bool k_memo = false, k_bound = false, k_exact_ub = false, k_exact_check = false, k_exact = false;
+  bool rlt = false, next_pair = false, grammar_simple = false, c_trace = false, pass1_only = false;
+  int rlt_beam = 0;
+  std::string sample_prof;
   bool l2r_ctx = false, l2r_kx = false;  // --l2r-ctx on: span context (needs Bml); --l2r-kx on: exact K
   bool l2r_ctx_p1 = false;               // --l2r-ctx p1: pass-1 context ratio lambda(a')
   double l2r_ctx_tau = 0.1;              // --l2r-ctx-tau
@@ -16851,7 +19754,7 @@ int main(int argc, char** argv) {
   int long_span = 100;
   int table_beam[BT_N];
   std::fill(table_beam, table_beam + BT_N, -1);
-  std::string states_path, pruned_path, exact_path, scores_path, ext_path, kept_path;
+  std::string states_path, pruned_path, exact_path, scores_path, ext_path, kept_path, beam_stats_path;
   double dump_min_w = 0.0, pruned_min_w = 0.0;
   std::unordered_set<uint64_t> remove_keys;
   bool stem_rank = false, stem_both = false, stem_qg2 = false;
@@ -16900,8 +19803,16 @@ int main(int argc, char** argv) {
   int pr_vcap = 0;                                      // --pr-v-cap N (0: none)
   int p2_qz_beam = 0, p2_qz_key = 1, p2_v_mode = 0, p2_v_bp = 0, p2_v_cap = 0, p2_v_trim = 0;
   int p2_g_mode = 0, p2_g_bp = 0, p2_g_cap = 0, nest_beam = -1, pre_beam = 0, pre_key = 0;
-  bool sw_check = false, p2_sweep = false, p2_vsweep = false, p2_v_floor = false;
+  bool b1_set = false, rlt_beam_set = false, sweep_set = false, vsweep_set = false;
+  int b2_width = 0;
+  int b2_at = -1, pbeam_explicit_at = -1, pbeam_ratio_at = -1, pbr[3] = {1, 2, 2};
+  bool user_pbeam = false, user_pratio = false;
+  bool sw_check = false, p2_sweep = false, p2_vsweep = false;
+  int p2_v_floor = 0;  // 0 off, 1 smallest kept mu, 2 log-weight 0
+  bool p2_v_cut_fb = false;
+  bool lazy_ml_cap = false;
   bool p2_g_suffix = false, p2_g_eager = false, p2_g_fb = false, profile = false, dump_qb_on = false;
+  bool qzbar_old = false;  // --qzbar-old: dense Qz→prQz like Oct-8 incperf (no sparse Qz_pre)
   int pr_vmlk = 0;                                      // --pr-v-mlk K (0: all)
   bool pr_vmlsteps = false;                             // --pr-v-mlsteps on
   bool pr_vxs = false;                                  // --pr-v-key xsys|xs
@@ -16924,8 +19835,13 @@ int main(int argc, char** argv) {
   // --preset default|accurate expands in place to the paper configuration (options after it
   // override it, options before it are overridden).  The energy model (--material, --dangles,
   // --param-file) is not part of it.
-  // default  = beam 1000, P beams 1000,2000,2000 (hard14 "default")
-  // accurate = beam 3000, P beams 3000,6000,6000 (hard14 "accurate"; also the recommended default)
+  // default  = beam 1000; the expanded --l2r-pbeam is 1000,2000,2000, then P1 is
+  //            replaced by b2 (two-index). accurate = beam 3000, same P1 replacement.
+
+  for (int a = 1; a < argc; ++a) {
+    if (std::strcmp(argv[a], "--l2r-pbeam") == 0) user_pbeam = true;
+    if (std::strcmp(argv[a], "--pbeam-ratio") == 0) user_pratio = true;
+  }
   std::vector<std::string> args_s;
   for (int a = 0; a < argc; ++a) {
     if (a > 0 && std::string(argv[a]) == "--preset") {
@@ -16995,6 +19911,22 @@ int main(int argc, char** argv) {
     else if (arg == "--loop-cap") {
       loop_cap = std::atoi(next());
       loop_cap_set = true;
+    }
+    else if (arg == "--loop-cap-p1" || arg == "--loop-cap-p2" || arg == "--loop-cap-scan") {
+      // Temporary: per-pass --loop-cap / --max-loop. "off"/"n"/0 = uncapped.
+      auto parse_pc = [](const std::string& v) -> int {
+        if (v == "n" || v == "off" || v == "0") return NO_LOOP_CAP;
+        return std::atoi(v.c_str());
+      };
+      const int v = parse_pc(next());
+      if (arg == "--loop-cap-p1") loop_cap_p1 = v;
+      else if (arg == "--loop-cap-p2") loop_cap_p2 = v;
+      else loop_cap_scan = v;
+    }
+    else if (arg == "--ml-lead-cap") {
+      std::string v = next();
+      if (v == "n" || v == "off") ml_lead_cap = 0;
+      else ml_lead_cap = std::atoi(v.c_str());
     }
     else if (arg == "--max-loop") max_loop = std::atoi(next());
     else if (arg == "--no-gu") allow_gu = false;
@@ -17418,6 +20350,7 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "--l2r-pbeam needs b1,b2,b3\n");
         return 2;
       }
+      pbeam_explicit_at = a;
     }
     else if (arg == "--l2r-p-hk") {
       l2r_p_hk = std::atoi(next());
@@ -17494,8 +20427,12 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "--l2r-ctx must be off, on or p1\n");
         return 2;
       }
-      l2r_ctx = s == "on";
-      l2r_ctx_p1 = s == "p1";
+      if (s != "off") {
+        std::fprintf(stderr, "[unsupported] --l2r-ctx %s is off; it builds Bml\n", s.c_str());
+        return 2;
+      }
+      l2r_ctx = false;
+      l2r_ctx_p1 = false;
     }
     else if (arg == "--l2r-ctx-tau") {
       l2r_ctx_tau = std::atof(next());
@@ -17735,6 +20672,7 @@ int main(int argc, char** argv) {
     }
     else if (arg == "--dump-states") states_path = next();
     else if (arg == "--dump-scores") scores_path = next();
+    else if (arg == "--beam-stats") beam_stats_path = next();
     else if (arg == "--dump-ext") ext_path = next();
     else if (arg == "--dump-min-w") dump_min_w = std::strtod(next(), nullptr);
     else if (arg == "--dump-pruned") pruned_path = next();
@@ -17757,16 +20695,12 @@ int main(int argc, char** argv) {
       remove_keys.insert(state_key(bt, v[0], v[1], v[2], v[3]));
     }
     else if (arg == "--qz-beam" || arg.rfind("--qz-beam=", 0) == 0) {
-      const std::string s = arg == "--qz-beam" ? next() : arg.substr(10);
-      p2_qz_beam = std::max(0, std::atoi(s.c_str()));
+      std::fprintf(stderr, "--qz-beam is removed; Q^z uses b2 at every length\n");
+      return 2;
     }
     else if (arg == "--qz-key" || arg.rfind("--qz-key=", 0) == 0) {
-      const std::string s = arg == "--qz-key" ? next() : arg.substr(9);
-      if (s != "key1" && s != "key2") {
-        std::fprintf(stderr, "--qz-key must be key1 or key2\n");
-        return 2;
-      }
-      p2_qz_key = s == "key2" ? 2 : 1;
+      std::fprintf(stderr, "--qz-key is removed; Q^z is ranked by C(k-1)+Q^z\n");
+      return 2;
     }
     else if (arg == "--v-pairs" || arg.rfind("--v-pairs=", 0) == 0) {
       const std::string s = arg == "--v-pairs" ? next() : arg.substr(10);
@@ -17862,12 +20796,123 @@ int main(int argc, char** argv) {
       p2_g_suffix = true;
     }
     else if (arg == "--sweep-check") sw_check = true;
-    else if (arg == "--sweep") p2_sweep = true;
-    else if (arg == "--v-sweep") p2_vsweep = true;
-    else if (arg == "--v-floor") p2_v_floor = true;
+    else if (arg == "--sweep") {
+      sweep_set = true;
+      if (a + 1 < argc && (std::string(argv[a + 1]) == "off" || std::string(argv[a + 1]) == "on"))
+        p2_sweep = std::string(argv[++a]) == "on";
+      else
+        p2_sweep = true;
+    }
+    else if (arg == "--v-sweep") {
+      vsweep_set = true;
+      if (a + 1 < argc && (std::string(argv[a + 1]) == "off" || std::string(argv[a + 1]) == "on"))
+        p2_vsweep = std::string(argv[++a]) == "on";
+      else
+        p2_vsweep = true;
+    }
+    else if (arg == "--k-memo") k_memo = true;
+    else if (arg == "--k-exact") k_exact = true;
+    else if (arg == "--k-bound") k_bound = true;
+    else if (arg == "--k-exact-ub") k_exact_ub = true;
+    else if (arg == "--k-exact-check") k_exact_check = true;
+    else if (arg == "--rlt") rlt = true;
+    else if (arg == "--pass1-only") pass1_only = true;
+    else if (arg == "--c-trace") c_trace = true;
+    else if (arg == "--grammar") {
+      if (a + 1 >= argc) {
+        std::fprintf(stderr, "--grammar needs full or simple\n");
+        return 2;
+      }
+      const std::string g = argv[++a];
+      if (g == "simple") grammar_simple = true;
+      else if (g == "full") grammar_simple = false;
+      else {
+        std::fprintf(stderr, "--grammar must be full or simple\n");
+        return 2;
+      }
+    }
+    else if (arg == "--next-pair") next_pair = true;
+    else if (arg == "--rlt-beam") {
+      rlt = true;
+      rlt_beam = std::max(0, std::atoi(next()));
+      rlt_beam_set = true;
+    }
+    else if (arg == "--sample-prof") sample_prof = next();
+    else if (arg == "--v-floor" || arg.rfind("--v-floor=", 0) == 0) {
+      const std::string s = arg == "--v-floor" ? std::string("min") : arg.substr(10);
+      if (s == "min") p2_v_floor = 1;
+      else if (s == "0") p2_v_floor = 2;
+      else {
+        std::fprintf(stderr, "--v-floor must be min or 0\n");
+        return 2;
+      }
+    }
+    else if (arg == "--v-cut-fb") {
+      if (a + 1 < argc && (std::string(argv[a + 1]) == "off" || std::string(argv[a + 1]) == "on"))
+        p2_v_cut_fb = std::string(argv[++a]) == "on";
+      else
+        p2_v_cut_fb = true;
+    }
+    else if (arg == "--mu-dump") {
+      g_mu_dump = next();
+    }
+    else if (arg == "--g-eq") {
+      g_eq_path = next();
+    }
+    else if (arg == "--miss-sample") {
+      g_miss_cap = std::max(0, std::atoi(next()));
+      g_miss_path = next();
+    }
+    else if (arg == "--v-query") {
+      const std::string in_path = next();
+      g_vquery_out = next();
+      if (a + 1 < argc && std::string(argv[a + 1]).rfind("--", 0) != 0) g_vtrace_path = next();
+      std::ifstream vin(in_path);
+      std::string line;
+      while (std::getline(vin, line)) {
+        if (line.empty() || line[0] == 's') continue;
+        std::istringstream ls(line);
+        std::string tag;
+        int st, x, y, b;
+        if (!(ls >> tag >> st >> x >> y >> b)) continue;
+        int kind = tag == "K" ? 1 : tag == "H" ? 2 : 0;
+        g_vquery.push_back({kind, st, x, y, b});
+      }
+    }
+    else if (arg == "--lazy-ml-cap") {
+      if (a + 1 < argc && (std::string(argv[a + 1]) == "off" || std::string(argv[a + 1]) == "on"))
+        lazy_ml_cap = std::string(argv[++a]) == "on";
+      else
+        lazy_ml_cap = true;
+    }
     else if (arg == "--nest-beam" || arg.rfind("--nest-beam=", 0) == 0) {
       const std::string s = arg == "--nest-beam" ? next() : arg.substr(12);
       nest_beam = std::max(0, std::atoi(s.c_str()));
+      b1_set = true;
+    }
+    else if (arg == "--b1") {
+      nest_beam = std::max(0, std::atoi(next()));
+      b1_set = true;
+    }
+    else if (arg == "--b2") {
+      const int nbeam = std::max(0, std::atoi(next()));
+      table_beam[BT_QB] = table_beam[BT_QM] = table_beam[BT_QM2] = table_beam[BT_QMP] =
+          table_beam[BT_QP] = nbeam;
+      b2_at = a;
+    }
+    else if (arg == "--qzbar-old") {
+      qzbar_old = true;
+    }
+    else if (arg == "--pbeam-ratio") {
+      int ra, rb, rc;
+      if (std::sscanf(next(), "%d:%d:%d", &ra, &rb, &rc) != 3 || ra < 0 || rb < 0 || rc < 0) {
+        std::fprintf(stderr, "--pbeam-ratio needs a:b:c of non-negative integers\n");
+        return 2;
+      }
+      pbr[0] = ra;
+      pbr[1] = rb;
+      pbr[2] = rc;
+      pbeam_ratio_at = a;
     }
     else if (arg == "--pre-beam" || arg.rfind("--pre-beam=", 0) == 0) {
       const std::string s = arg == "--pre-beam" ? next() : arg.substr(11);
@@ -17930,6 +20975,32 @@ int main(int argc, char** argv) {
                              "--grow-node-trunc-r -1, --pr-v-key xs, --pr-fast ml\n");
     }
   }
+  if (pbeam_ratio_at > pbeam_explicit_at) {
+    const int b4 = beam > 0 ? beam : 0;
+    for (int k = 0; k < 3; ++k) l2r_pbeam[k] = pbr[k] * b4;
+  }
+  // b1 and b2 default to 200, independent of b4. rlt-beam defaults to b4.
+  // Sweep and the V sweep are on. No length gate. Q^z and Q^z_pre use b2.
+  if (!b1_set) nest_beam = 200;
+  if (b2_at < 0) {
+    const int b2tabs[] = {BT_QB, BT_QM, BT_QM2, BT_QMP, BT_QP};
+    for (int t : b2tabs)
+      if (table_beam[t] < 0) table_beam[t] = 200;
+  }
+  b2_width = table_beam[BT_QM] >= 0 ? table_beam[BT_QM] : 200;
+  // P1(a, t) is two-index, so it takes b2. P2 and P3 stay at 2 x b4 unless the
+  // command line set --l2r-pbeam or --pbeam-ratio itself.
+  if (!user_pbeam && !user_pratio) l2r_pbeam[0] = b2_width;
+  // P2 is three indices and P3 is four, so both take b4 on the simplified grammar.
+  if (grammar_simple && !user_pbeam && !user_pratio && beam > 0) {
+    l2r_pbeam[1] = beam;
+    l2r_pbeam[2] = beam;
+  }
+  std::fprintf(stderr, "[arity] b2 %d b4 %d pbeam %d,%d,%d\n", b2_width, beam, l2r_pbeam[0],
+               l2r_pbeam[1], l2r_pbeam[2]);
+  if (!rlt_beam_set) rlt_beam = beam;
+  if (!sweep_set) p2_sweep = true;
+  if (!vsweep_set) p2_vsweep = true;
 
   if (arm_score && access_file.empty()) {
     std::fprintf(stderr, "--arm-score on needs --access-file\n");
@@ -18095,6 +21166,10 @@ int main(int argc, char** argv) {
   }
   g_skip_bml = (g_grow_rec || g_U_nobml) && (pr_abl & DP03::PA_BML) && !pr_check &&
                !(pk_l2r == 1 && l2r_ctx);
+  if (stem_pr && !g_skip_bml) {
+    std::fprintf(stderr, "[unsupported] principled score with Bml is off\n");
+    g_skip_bml = true;
+  }
   PK.beta1 += pk_db[0];
   PK.beta1m += pk_db[1];
   PK.beta1p += pk_db[2];
@@ -18220,6 +21295,17 @@ int main(int argc, char** argv) {
     else load_rna1999(param_file);
   }
   if (mat_v04 && !loop_cap_set) loop_cap = V04_MAX_LOOP;
+  // Resolve per-pass caps (temporary --loop-cap-p1/p2/scan). Default: --loop-cap.
+  if (loop_cap_p1 < 0) loop_cap_p1 = loop_cap;
+  if (loop_cap_p2 < 0) loop_cap_p2 = loop_cap;
+  if (loop_cap_scan < 0) loop_cap_scan = loop_cap;
+  auto apply_max_loop = [&](int lc) {
+    // Keep energy max_loop in lockstep with the DP window for this pass.
+    max_loop = (lc >= NO_LOOP_CAP) ? NO_LOOP_CAP : lc;
+  };
+  if (loop_cap_p1 != loop_cap || loop_cap_p2 != loop_cap || loop_cap_scan != loop_cap)
+    std::fprintf(stderr, "[loop-cap-pass] p1 %d p2 %d scan %d (base %d)\n", loop_cap_p1,
+                 loop_cap_p2, loop_cap_scan, loop_cap);
   if (!pruned_path.empty() && gcfg.on) {
     std::fprintf(stderr, "--dump-pruned does not log the gated pruning (needs --gate off)\n");
     return 2;
@@ -18253,6 +21339,13 @@ int main(int argc, char** argv) {
     return 2;
   }
   FILE* scores_f = nullptr;
+  if (!beam_stats_path.empty()) {
+    g_beam_stats.open(beam_stats_path);
+    if (!g_beam_stats.f) {
+      std::fprintf(stderr, "--beam-stats: cannot open %s\n", beam_stats_path.c_str());
+      return 2;
+    }
+  }
   if (dump_scores && !(scores_f = std::fopen(scores_path.c_str(), "w"))) {
     std::fprintf(stderr, "cannot write %s\n", scores_path.c_str());
     return 2;
@@ -18265,6 +21358,125 @@ int main(int argc, char** argv) {
   std::unordered_map<std::string, std::unordered_map<uint64_t, double>> exact_states;
   if (!exact_path.empty()) exact_states = load_states(exact_path);
   const std::unordered_map<uint64_t, double> no_states;
+
+  // Every allocated table, printed before any DP. A table with 2 or more indices and no
+  // positive beam aborts the run.
+  auto beam_audit = [&](int n) -> int {
+    int bad = 0;
+    auto row = [&](const char* stage, const char* name, int idx, const char* src, int w) {
+      const int active = w > 0;
+      if (idx == 2) {
+        std::fprintf(stderr, "[beams] %s %s idx %d beam %s %d active %d binds %d\n", stage, name,
+                     idx, src, w, active, active && w < n);
+      } else {
+        std::fprintf(stderr, "[beams] %s %s idx %d beam %s %d active %d\n", stage, name, idx, src,
+                     w, active);
+      }
+      // Width 0 keeps every state (beam off). A negative width is an unset table.
+      if (idx >= 2 && w < 0) {
+        std::fprintf(stderr, "[beams] abort: %s %s has %d indices and no active beam\n", stage,
+                     name, idx);
+        bad = 1;
+      }
+    };
+    auto tw = [&](int t) { return table_beam[t] >= 0 ? table_beam[t] : beam; };
+    auto nest_tables = [&](const char* stage, int b1) {
+      row(stage, "Qb", 2, "b1", b1);
+      row(stage, "Qm", 2, "b1", b1);
+      row(stage, "Qm2", 2, "b1", b1);
+      row(stage, "Qp", 2, "b1", b1);
+      row(stage, "Qmp", 2, "b1", b1);
+      row(stage, "Qz", 2, "b2", b2_width);
+      row(stage, "C", 1, "none", 0);
+    };
+    const int bV = p2_v_cap > 0 ? p2_v_cap : pr_vcap;
+    const char* bVsrc = p2_v_cap > 0 ? "b_V" : "pr_vcap";
+    std::fprintf(stderr, "[beams] n %d b1 %d b2 %d b4 %d bV %d bG %d rlt %d p %d,%d,%d lp_hk %d\n",
+                 n, nest_beam, b2_width, beam, bV, g_ntr_K, rlt ? rlt_beam : 0, l2r_pbeam[0],
+                 l2r_pbeam[1], l2r_pbeam[2], l2r_p_hk);
+    if (stem_rank) nest_tables("stem", nest_beam);
+    if (stem_pr) {
+      nest_tables("pass1", pre_beam > 0 ? pre_beam : nest_beam);
+      row("pass2", "V", 3, bVsrc, bV);
+      if (g_ntr_K > 0)
+        row("pass2", "G.L", 3, "b_G", g_ntr_K);
+      else
+        std::fprintf(stderr, "[beams] pass2 G.L idx 3 beam b_G 0 active 0\n");
+      if (g_rfv)
+        row("pass2", "G.R", 3, bVsrc, bV);
+      else if (g_ntr_KR > 0)
+        row("pass2", "G.R", 3, "b_G", g_ntr_KR);
+      else if (g_ntr_K > 0)
+        row("pass2", "G.R", 3, "b_G", g_ntr_K);
+      else
+        std::fprintf(stderr, "[beams] pass2 G.R idx 3 beam none 0 active 0\n");
+      row("pass2", "Qz_pre", 2, "b2", b2_width);
+    }
+    row("scan", "Qb", 2, "b2", tw(BT_QB));
+    row("scan", "Qm", 2, "b2", tw(BT_QM));
+    row("scan", "Qm2", 2, "b2", tw(BT_QM2));
+    row("scan", "Qp", 2, "b2", tw(BT_QP));
+    row("scan", "Qmp", 2, "b2", tw(BT_QMP));
+    row("scan", "Qz", 2, "b2", b2_width);
+    row("scan", "C", 1, "none", 0);
+    if (allow_pk) {
+      row("scan", "PKM", 2, "b4", tw(BT_PKM));
+      for (const char* nm : {"R", "Rs", "Rls", "Rlss", "Rrs", "U", "Us", "Uls", "Ulss", "Urs", "S"})
+        row("scan", nm, 4, "b4", beam);
+      for (int t : {BT_QG, BT_QGLS, BT_QGL, BT_QGR, BT_QGRS})
+        row("scan", BT_NAMES[t], 4, "b4", tw(t));
+      if (rlt) {
+        row("scan", "Rlt", 4, "rlt", rlt_beam);
+        row("scan", "Ult", 4, "rlt", rlt_beam);
+      }
+    }
+    if (pk_l2r == 1) {
+      row("scan", "P1", 2, "b2", l2r_pbeam[0]);
+      row("scan", "P2", 3, grammar_simple ? "b4" : "2b4", l2r_pbeam[1]);
+      row("scan", "P3", 4, grammar_simple ? "b4" : "2b4", l2r_pbeam[2]);
+      row("scan", "H", 3, "lp_hk", l2r_p_hk);
+      if (l2r_p1 > 0) row("p1sweep", "states", 4, "p1b", l2r_p1_beam);
+      if (grammar_simple) {
+        for (const char* nm : {"R^M", "R^M2", "R^Multi", "U^M", "U^M2", "U^Multi"})
+          row("scan", nm, 4, "b4", beam);
+      }
+    }
+    auto dev = [&](const char* name, int on, const std::string& what) {
+      std::fprintf(stderr, "[deviation] %s active %d beam 0 %s\n", name, on, what.c_str());
+    };
+    dev("max_gap_scan", arm_score ? 1 : 0,
+        "arm-score window " + std::to_string(max_gap_scan) + "; unused when --arm-score is off");
+    dev("max_arm_len", max_arm_len > 0 ? 1 : 0,
+        "longest arm window; 0 means the sequence length");
+    dev("gap_step", gap_step ? 1 : 0,
+        "groups the b4 beam per step j instead of per (v,j); not a separate count");
+    dev("gate", gcfg.on ? 1 : 0,
+        "drops Qg/Qgl candidates by an access threshold; not a count by key");
+    dev("arm_score", arm_score ? 1 : 0,
+        "replaces the arm weight with an access score; not a count by key");
+    dev("access", (arm_score || gcfg.on) ? 1 : 0,
+        "access file for arm_score and the gate; not loaded in the L2R default");
+    dev("loop_cap", 1, "energy-model max unpaired loop (" + std::to_string(loop_cap) +
+                           "); not a count by key");
+    dev("ml_lead_cap", ml_lead_cap > 0 ? 1 : 0,
+        "leading unpaired run before the first multiloop branch is at most " +
+            std::to_string(ml_lead_cap > 0 ? ml_lead_cap - 1 : n) +
+            " bases; not a beam");
+    dev("pair_bonus", pair_bonus != 0.0 ? 1 : 0,
+        "added to every pair weight (value " + std::to_string(pair_bonus) + ")");
+    dev("lK", k_exact ? 0 : 1, "K uses the ratio lK, not a bound");
+    dev("V_miss", p2_vsweep ? 0 : 1,
+        "a V miss falls back to the old V builder; with --v-sweep a miss is -inf");
+    dev("v-floor", p2_v_floor ? 1 : 0,
+        "fills a missing V entry with the smallest kept mu or log-weight 0");
+    dev("v-cut-fb", p2_v_cut_fb ? 1 : 0,
+        "a cut V entry (full map) is scored kappa_min / C_pre(b-1); ranking only");
+    if (bad) {
+      std::fprintf(stderr, "[beams] abort: a table with 2 or more indices has no active beam\n");
+      return 2;
+    }
+    return 0;
+  };
 
   std::string line, id;
   while (std::getline(std::cin, line)) {
@@ -18286,16 +21498,26 @@ int main(int argc, char** argv) {
       while (ps >> a >> b) restrict_list.emplace_back(std::min(a, b) - 1, std::max(a, b) - 1);
       allowed_pairs = &restrict_list;
     }
+    if (beam_audit(static_cast<int>(seq.size()))) return 2;
 
     auto t0 = std::chrono::steady_clock::now();
+    const double cpu0 = ru_cpu();
+    double pass1_s = 0, pass2_s = 0, scan_s = 0;
+    double cpu_pass1 = 0, cpu_pass2 = 0;
     AccessRec access;
     if (need_access) access = load_access(access_idx, seq);
     std::unique_ptr<Gate> gate;
     if (gcfg.on || gate_diag)
       gate.reset(new Gate(static_cast<int>(seq.size()), access, gcfg.span, gcfg.delta, gcfg.both));
-    DP03 dp(seq, beam, allow_pk, loop_cap, score_qz, arm_score, arm_score ? &access : nullptr,
+    apply_max_loop(loop_cap_scan);
+    DP03 dp(seq, beam, allow_pk, loop_cap_scan, score_qz, arm_score, arm_score ? &access : nullptr,
             max_gap_scan, max_arm_len, gap_step, &gcfg, gcfg.on ? gate.get() : nullptr,
             table_beam, states_f != nullptr || dump_scores);
+    dp.qz_beam_fill = !qzbar_old;
+    dp.p2_qz_beam = b2_width;
+    dp.qzbar_old = qzbar_old;
+    if (qzbar_old)
+      std::fprintf(stderr, "[qzbar-old] dense Qz→prQz (no beamed Qz_pre)\n");
     const std::string sid = id.empty() ? "-" : id;
     g_mem_sid = sid;
     if (g_mem_log) {
@@ -18303,28 +21525,37 @@ int main(int argc, char** argv) {
       dp.mem_items(it, "", true, false);
       mem_log("dp_alloc", it);
     }
-    // --stem-est / --stem-diag: nested-only run of the same model (exact for n <= 200, else
-    // step beam 100), then the stem tables
+    // Stem estimate, principled pre-pass and chain all use b1. Q^z uses b2.
     StemEst stem;
     std::vector<StemEst> diag_ests;
     double stem_sec = 0.0, chain_prep_sec = 0.0;
+    // b1 is the nested beam at every length. The n<=1000 lean skip stays off once b1 is set.
     const bool lean = l2r_lean && pk_l2r == 1 && (l2r_beam < 0 ? beam : l2r_beam) > 0 &&
                       stem_rank && stem_pr && g_grow_rec && !stem_diag && !dump_scores &&
-                      !dump_ext && !stem_hr_av && !stem_hr_phi && !stem_bg_check &&
-                      static_cast<int>(seq.size()) <= 1000;
+                      !dump_ext && !stem_hr_av && !stem_hr_phi && !stem_bg_check && nest_beam < 0;
     if (l2r_lean && !lean)
       std::fprintf(stderr, "[l2r-lean] %s not applicable to this run's flags: full pre-pass\n",
                    sid.c_str());
     stem.lean = lean;
     if (stem_rank || stem_diag || dump_scores || dump_ext) {
       auto ts = std::chrono::steady_clock::now();
-      const int ns = static_cast<int>(seq.size());
       std::unique_ptr<DP03> nest;
       if (!lean) {
-        nest.reset(new DP03(seq, ns <= 200 ? 0 : 100, false, loop_cap, score_qz, false, nullptr,
+        const int scan_nb = nest_beam;
+        apply_max_loop(loop_cap_p1);
+        nest.reset(new DP03(seq, scan_nb, false, loop_cap_p1, score_qz, false, nullptr,
                             max_gap_scan, max_arm_len, true, nullptr, nullptr, nullptr, false));
-        nest->chain_qmp = stem_chain && ns > 1000;
+        nest->chain_qmp = stem_chain;
+        nest->qz_beam_fill = !qzbar_old;
+        nest->p2_qz_beam = b2_width;
+        nest->qzbar_old = qzbar_old;
+        std::fprintf(stderr, "[nest-beam] b1 %d\n", scan_nb);
+        if (pass1_only && !sample_prof.empty()) sample_start(sample_prof.c_str());
+        const auto t_stem = std::chrono::steady_clock::now();
+        g_beam_stats.set_pass("stem");
         nest->pfunc();
+        pass1_s += std::chrono::duration<double>(std::chrono::steady_clock::now() - t_stem).count();
+        nest->log_nest("stem");
         if (g_mem_log) {
           std::vector<MemItem> it;
           nest->mem_items(it, "nest_", true, false);
@@ -18333,7 +21564,18 @@ int main(int argc, char** argv) {
       }
       if (stem_rank) {
         if (!lean) {
+          const auto t_se = std::chrono::steady_clock::now();
           nest->build_stem_est(stem_loop, stem, stem_qg2);
+          const double se_dn = static_cast<double>(seq.size());
+          std::fprintf(stderr,
+                       "[stem-est] sec %.6f entries %zu per_nt %.3f idx_mb %.1f t_mb %.1f hwm_mb %.1f\n",
+                       std::chrono::duration<double>(std::chrono::steady_clock::now() - t_se).count(),
+                       stem.entries, se_dn > 0 ? static_cast<double>(stem.entries) / se_dn : 0.0,
+                       (12.0 * static_cast<double>(stem.entries + stem.entries2 + stem.entries_av) +
+                        16.0 * static_cast<double>(stem.index.nodes() + stem.index2.nodes() +
+                                                   stem.index_av.nodes())) /
+                           1048576.0,
+                       8.0 * se_dn * se_dn / 1048576.0, hwm_mb());
           if (g_mem_log) {
             std::vector<MemItem> it;
             stem_mem_items(stem, it);
@@ -18354,18 +21596,24 @@ int main(int argc, char** argv) {
         dp.set_stem_grow(grow_lg, grow_cut, grow_nodes, stem_helpers, ml_span);
         if (stem_profile) dp.set_stem_profile(true, prof_eps, ml_tail, prof_check);
         if (bg_reorder) dp.set_stem_bg_reorder(true, ro_check);
-        // exact nested-only run (n <= 1000), shared by the chain and the principled pre-pass
+        // exact nested-only run, shared by the chain and the principled pre-pass when b1 is 0
         std::unique_ptr<DP03> nexact;
         auto exact_nested = [&]() -> DP03& {
           if (!nexact) {
-            nexact.reset(new DP03(seq, 0, false, loop_cap, score_qz, false, nullptr, max_gap_scan,
+            apply_max_loop(loop_cap_p1);
+            nexact.reset(new DP03(seq, 0, false, loop_cap_p1, score_qz, false, nullptr, max_gap_scan,
                                   max_arm_len, true, nullptr, nullptr, nullptr, false));
             nexact->chain_qmp = true;
             nexact->keep_closed_b = stem_pr_nested;
             nexact->prof_on = profile;
-            nexact->qz_beam_fill = p2_qz_beam > 0;
-            nexact->p2_qz_beam = p2_qz_beam;
+            nexact->qz_beam_fill = !qzbar_old;
+            nexact->p2_qz_beam = b2_width;
+            nexact->qzbar_old = qzbar_old;
+            const auto t_ex = std::chrono::steady_clock::now();
+            g_beam_stats.set_pass("pass1");
             nexact->pfunc();
+            pass1_s += std::chrono::duration<double>(std::chrono::steady_clock::now() - t_ex).count();
+            nexact->log_nest("pass1");
             if (g_mem_log) {
               std::vector<MemItem> it;
               nexact->mem_items(it, "exact_", true, false);
@@ -18375,28 +21623,47 @@ int main(int argc, char** argv) {
           return *nexact;
         };
         if (stem_pr || stem_pr_nested) {
-          // Nested pre-pass: exact for n <= 1000. Past that, beam 100 over every pair.
-          // --nest-beam b replaces that choice (0 = exact). No span window.
+          // Nested pre-pass at b1. --pre-beam replaces b1 when it is set.
           const auto tp = std::chrono::steady_clock::now();
           std::unique_ptr<DP03> nbeam;
-          const bool use_beam = pre_beam > 0 || (nest_beam >= 0 ? nest_beam > 0 : ns > 1000);
-          const int nb = pre_beam > 0 ? pre_beam : (nest_beam >= 0 ? nest_beam : 100);
+          const int nb = pre_beam > 0 ? pre_beam : nest_beam;
+          const bool use_beam = nb > 0;
+          std::fprintf(stderr, "[nest-beam] pre %d\n", use_beam ? nb : 0);
           if (use_beam) {
-            nbeam.reset(new DP03(seq, nb, false, loop_cap, score_qz, false, nullptr, max_gap_scan,
+            apply_max_loop(loop_cap_p1);
+            nbeam.reset(new DP03(seq, nb, false, loop_cap_p1, score_qz, false, nullptr, max_gap_scan,
                                  max_arm_len, true, nullptr, nullptr, nullptr, false));
             nbeam->chain_qmp = true;
             nbeam->keep_closed_b = stem_pr_nested;
             nbeam->prof_on = profile;
-            nbeam->qz_beam_fill = p2_qz_beam > 0;
-            nbeam->p2_qz_beam = p2_qz_beam;
+            nbeam->qz_beam_fill = !qzbar_old;
+            nbeam->p2_qz_beam = b2_width;
+            nbeam->qzbar_old = qzbar_old;
             nbeam->pre_key_inside = pre_key == 1;
             nbeam->p2_sweep = p2_sweep;
+            const auto t_pre = std::chrono::steady_clock::now();
+            g_beam_stats.set_pass("pass1");
             nbeam->pfunc();
+            pass1_s += std::chrono::duration<double>(std::chrono::steady_clock::now() - t_pre).count();
+            nbeam->log_nest("pass1");
+            if (pass1_only) {
+              if (!sample_prof.empty()) sample_stop();
+              std::fprintf(stderr,
+                           "[pass1-only] pass1_s %.6f stem_idx %zu pr_Mbar 0 pr_QbIn 0 grow_roots 0 "
+                           "hwm_mb %.1f\n",
+                           pass1_s, stem.entries, hwm_mb());
+              nbeam->log_pr_side();
+              return 0;
+            }
           }
           DP03& np = nbeam ? *nbeam : exact_nested();
+          apply_max_loop(loop_cap_p2);
+          np.set_loop_cap(loop_cap_p2);
           auto stamp_p2 = [&](DP03& o) {
-            o.p2_qz_beam = p2_qz_beam;
-            o.p2_qz_key = p2_qz_key;
+            o.qz_beam_fill = !qzbar_old;
+            o.p2_qz_beam = b2_width;
+            o.qzbar_old = qzbar_old;
+            o.p2_qz_key = 1;
             o.p2_v_mode = p2_v_mode;
             o.p2_v_bp = p2_v_bp;
             o.p2_v_cap = p2_v_cap;
@@ -18411,6 +21678,8 @@ int main(int argc, char** argv) {
             o.p2_sweep = p2_sweep;
             o.p2_vsweep = p2_vsweep;
             o.p2_v_floor = p2_v_floor;
+            o.p2_v_cut_fb = p2_v_cut_fb;
+            o.lazy_ml_cap = lazy_ml_cap;
             o.prof_on = profile;
           };
           stamp_p2(np);
@@ -18419,7 +21688,24 @@ int main(int argc, char** argv) {
           stem.skip_kept = lean && oracle_f == nullptr && !pr_check;
           stem.skip_qbin = lean && l2r_p1 == 0 && !l2r_ctx_p1 && !pr_v_ratio &&
                            pr_v_diag.empty() && pr_v_sample <= 0.0 && g_v2dump.empty();
+          cpu_pass1 = ru_cpu() - cpu0;
+          const double hwm_pass1 = hwm_mb();
+          const int nseq = static_cast<int>(seq.size());
+          std::fprintf(stderr,
+                       "[stage] pass1 n %d cpu %.3f cpu_s_nt %.6f hwm_mb %.1f hwm_mb_nt %.4f\n",
+                       nseq, cpu_pass1, nseq > 0 ? cpu_pass1 / nseq : 0.0, hwm_pass1,
+                       nseq > 0 ? hwm_pass1 / nseq : 0.0);
+          const auto t_p2 = std::chrono::steady_clock::now();
+          const double cpu_p2_0 = ru_cpu();
+          g_beam_stats.set_pass("pass2");
           np.build_principled(stem, pr_floor, stem_pr_nested, pr_check, pr_partner_floor);
+          pass2_s += std::chrono::duration<double>(std::chrono::steady_clock::now() - t_p2).count();
+          cpu_pass2 = ru_cpu() - cpu_p2_0;
+          const double hwm_pass2 = hwm_mb();
+          std::fprintf(stderr,
+                       "[stage] pass2 n %d cpu %.3f cpu_s_nt %.6f hwm_mb %.1f hwm_mb_nt %.4f\n",
+                       nseq, cpu_pass2, nseq > 0 ? cpu_pass2 / nseq : 0.0, hwm_pass2,
+                       nseq > 0 ? hwm_pass2 / nseq : 0.0);
           stem.prof_qz_pre = np.prof_qz_sec;
           if (g_mem_log) {
             std::vector<MemItem> it;
@@ -18459,12 +21745,8 @@ int main(int argc, char** argv) {
         }
         if ((stem_chain && !lean) || stem_hr_av || stem_hr_phi) {
           const auto tc = std::chrono::steady_clock::now();
-          if (ns <= 1000) {
-            DP03& nc = exact_nested();
-            if (stem_chain) nc.build_chain(stem, chain_floor);
-            if (stem_hr_av) nc.build_hr_av(stem, stem_hr_gamma);
-            if (stem_hr_phi) nc.build_hr_phi(stem, stem_hr_gamma);
-          } else {
+          // Chain and hairpin tables use the same b1 nested DP.
+          if (!lean && nest) {
             if (stem_chain) nest->build_chain(stem, chain_floor);
             if (stem_hr_av) nest->build_hr_av(stem, stem_hr_gamma);
             if (stem_hr_phi) nest->build_hr_phi(stem, stem_hr_gamma);
@@ -18580,6 +21862,15 @@ int main(int argc, char** argv) {
         return 2;
       }
       dp.l2r_diag = l2r_diag && dp.l2r_beam > 0;
+      dp.rlt = rlt;
+      dp.next_pair = next_pair;
+      dp.rlt_beam = rlt_beam;
+      dp.grammar_simple = grammar_simple;
+      dp.c_trace = c_trace;
+      if (grammar_simple && !l2r_spawn_inc) {
+        std::fprintf(stderr, "--grammar simple needs --l2r-spawn inc\n");
+        return 2;
+      }
       dp.l2r_init();
       if (g_mem_log) {
         std::vector<MemItem> it;
@@ -18676,6 +21967,16 @@ int main(int argc, char** argv) {
         dp.l2r_yw_rebuild();
       }
       dp.lpf = l2r_perf;
+      dp.k_memo = k_memo || k_exact_ub;
+      dp.k_bound = k_bound;
+      dp.k_exact_ub = k_exact_ub;
+      dp.k_exact_check = k_exact_check;
+      if (k_exact) dp.sx_k_exact = true;
+      dp.rlt = rlt;
+      dp.next_pair = next_pair;
+      dp.rlt_beam = rlt_beam;
+      dp.grammar_simple = grammar_simple;
+      dp.c_trace = c_trace;
       dp.l2r_init_scores();
       if (p2_g_eager) dp.growth_eager();
       if (g_mem_log) {
@@ -18709,11 +22010,39 @@ int main(int argc, char** argv) {
     double logz = NEG_INF;
     bool partial = false;
     const double cpu_p2 = cpu_sec(), hwm_p2 = hwm_mb();
+    if (!sample_prof.empty()) sample_start(sample_prof.c_str());
+    const auto t_scan = std::chrono::steady_clock::now();
+    g_beam_stats.set_pass("scan");
+    apply_max_loop(loop_cap_scan);
+    dp.set_loop_cap(loop_cap_scan);
     try {
       logz = dp.pfunc();
     } catch (const CpuStop&) {
       partial = true;
     }
+    scan_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_scan).count();
+    {
+      const double cpu_scan = ru_cpu() - cpu0 - cpu_pass1 - cpu_pass2;
+      const double hwm_scan = hwm_mb();
+      const int nseq = static_cast<int>(seq.size());
+      const double ntd = nseq > 0 ? static_cast<double>(nseq) : 1.0;
+      const double idx_mb =
+          (12.0 * static_cast<double>(stem.entries + stem.entries2 + stem.entries_av) +
+           16.0 * static_cast<double>(stem.index.nodes() + stem.index2.nodes() +
+                                      stem.index_av.nodes())) /
+          1048576.0;
+      std::fprintf(stderr,
+                   "[stage] scan n %d cpu %.3f cpu_s_nt %.6f hwm_mb %.1f hwm_mb_nt %.4f\n",
+                   nseq, cpu_scan, cpu_scan / ntd, hwm_scan, hwm_scan / ntd);
+      std::fprintf(stderr,
+                   "[tables] n %d stem_idx %zu stem_idx_mb %.1f pr_Mbar %zu pr_Mbar_mb %.1f "
+                   "pr_QbIn %zu pr_QbIn_mb %.1f n2_mb %.1f\n",
+                   nseq, stem.entries, idx_mb, stem.prMbar.size(),
+                   static_cast<double>(stem.prMbar.size()) * 8.0 / 1048576.0, stem.prQbIn.size(),
+                   static_cast<double>(stem.prQbIn.size()) * 8.0 / 1048576.0,
+                   8.0 * ntd * ntd / 1048576.0);
+    }
+    if (!sample_prof.empty()) sample_stop();
     if (g_mem_log) {
       std::vector<MemItem> it;
       dp.mem_items(it, "", true, pk_l2r != 0);
@@ -18727,13 +22056,16 @@ int main(int argc, char** argv) {
       dp.profile_dump(sid.c_str(), fin, stem.prof_qz_pre);
     }
     if (g_mass_f) g_mass_flush();
-    if (p2_qz_beam > 0 || p2_v_mode > 0 || p2_g_mode > 0 || p2_v_cap > 0 || p2_g_suffix ||
-        p2_g_eager || p2_g_fb) {
+    if (b2_width > 0 || p2_qz_beam > 0 || p2_v_mode > 0 || p2_g_mode > 0 || p2_v_cap > 0 ||
+        p2_g_suffix || p2_g_eager || p2_g_fb || p2_sweep || p2_vsweep) {
       std::fprintf(stderr,
-                   "[pass2] %s qz %lld qz_s %.4f v_pairs %lld v_ent %lld v_s %.4f g_L %lld "
-                   "prep_s %.4f\n",
-                   sid.c_str(), stem.p2_qz_n, stem.p2_qz_sec, dp.v_pairs, dp.pr_V_entries,
-                   dp.pr_static_sec, dp.ntr_kept[0], stem.pr_prep_sec);
+                   "[pass2] %s qz %lld qz_mb %.3f qz_s %.4f v_pairs %lld v_ent %lld v_s %.4f "
+                   "g_L %lld prep_s %.4f\n",
+                   sid.c_str(), stem.p2_qz_n,
+                   static_cast<double>(stem.p2_qz_n * static_cast<long long>(sizeof(StemEst::QzEnt))) /
+                       1048576.0,
+                   stem.p2_qz_sec, dp.v_pairs, dp.pr_V_entries, dp.pr_static_sec, dp.ntr_kept[0],
+                   stem.pr_prep_sec);
     }
     if (pk_l2r != 0) {
       const std::vector<long long> sc = dp.l2r_states();
@@ -18751,6 +22083,134 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, " checkR %lld mis %lld max_rel %.3e checkQp %lld mis %lld max_rel %.3e",
                      dp.lc_R_n, dp.lc_R_mis, dp.lc_R_rel, dp.lc_Qp_n, dp.lc_Qp_mis, dp.lc_Qp_rel);
       std::fprintf(stderr, "\n");
+      const double nn = static_cast<double>(seq.size());
+      auto per = [&](long long x) { return nn > 0.0 ? static_cast<double>(x) / nn : 0.0; };
+      const long long r_ml = dp.ext_n[1] + dp.ext_n[2] + dp.ext_n[3];
+      const long long u_ml = dp.ext_n[5] + dp.ext_n[6] + dp.ext_n[7];
+      std::fprintf(stderr,
+                   "[ext] n %d R_int %.3f R_ml %.3f R_f %.3f R_g %.3f R_h %.3f "
+                   "U_int %.3f U_ml %.3f U_f %.3f U_g %.3f U_h %.3f\n",
+                   static_cast<int>(seq.size()), per(dp.ext_n[0]), per(r_ml), per(dp.ext_n[1]),
+                   per(dp.ext_n[2]), per(dp.ext_n[3]), per(dp.ext_n[4]), per(u_ml), per(dp.ext_n[5]),
+                   per(dp.ext_n[6]), per(dp.ext_n[7]));
+      std::fprintf(stderr,
+                   "[it] n %d R_int %.3f R_h %.3f R_ls %.3f R_rs %.3f "
+                   "U_int %.3f U_h %.3f U_ls %.3f U_rs %.3f\n",
+                   static_cast<int>(seq.size()), per(dp.it_int[0]), per(dp.it_h[0]),
+                   per(dp.it_ls[0]), per(dp.it_rs[0]), per(dp.it_int[1]), per(dp.it_h[1]),
+                   per(dp.it_ls[1]), per(dp.it_rs[1]));
+      std::fprintf(stderr,
+                   "[qp] n %d beam %d pre_per %.3f kept_per %.3f pre_max %d kept_max %d bind %lld\n",
+                   static_cast<int>(seq.size()), dp.qp_beam, per(dp.qp_pre_n),
+                   per(dp.qp_kept_n), dp.qp_pre_max, dp.qp_kept_max, dp.qp_bind_n);
+      std::fprintf(stderr,
+                   "[qm] n %d beam %d pre_per %.3f kept_per %.3f pre_max %d kept_max %d bind %lld\n",
+                   static_cast<int>(seq.size()), dp.qm_beam, per(dp.qm_pre_n), per(dp.qm_kept_n),
+                   dp.qm_pre_max, dp.qm_kept_max, dp.qm_bind_n);
+      long long scored = 0;
+      for (int t = DP03::PT_R; t < DP03::PT_N; ++t) scored += dp.l2r_pre[t];
+      const double wall_s =
+          std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+      const double ntd = nn > 0.0 ? nn : 1.0;
+      std::fprintf(stderr,
+                   "[pos] n %d per_nt interior %.3f h %.3f ls %.3f rs %.3f tail %.3f "
+                   "S %.3f P1 %.3f P2 %.3f P3 %.3f Qz %.3f Qz_pre %.3f K %.3f scored %.3f\n",
+                   static_cast<int>(seq.size()),
+                   per(dp.it_int[0] + dp.it_int[1]), per(dp.it_h[0] + dp.it_h[1]),
+                   per(dp.it_ls[0] + dp.it_ls[1]), per(dp.it_rs[0] + dp.it_rs[1]), per(dp.rlt_ext),
+                   per(dp.l2r_tr[DP03::LT_S]), per(dp.l2r_pre[DP03::PT_P1]),
+                   per(dp.l2r_pre[DP03::PT_P2]), per(dp.l2r_pre[DP03::PT_P3]), per(dp.qz_cand),
+                   per(stem.p2_qz_n), per(dp.sx_k_n), per(scored));
+      std::fprintf(stderr,
+                   "[vmiss] n %d floor %d cut_fb %d look %lld miss %lld look_U %lld miss_U %lld "
+                   "look_R %lld miss_R %lld look_S %lld miss_S %lld key0_U %lld part_U %lld "
+                   "key0_R %lld fb %lld\n",
+                   static_cast<int>(seq.size()), dp.p2_v_floor, dp.p2_v_cut_fb ? 1 : 0, dp.rfv_look,
+                   dp.rfv_miss, dp.rfv_look_u, dp.rfv_miss_u, dp.rfv_look_r, dp.rfv_miss_r,
+                   dp.rfv_look_s, dp.rfv_miss_s, dp.rfv_key0_u, dp.rfv_part_u, dp.rfv_key0_r,
+                   dp.vfb_n);
+      {
+        static const char* sn[DP03::ST_N] = {"P1", "P2", "P3", "R", "S", "U"};
+        for (int s = 0; s < DP03::ST_N; ++s)
+          std::fprintf(stderr,
+                       "[vmiss3] %s V %lld %lld %lld K %lld %lld %lld H %lld %lld %lld\n",
+                       sn[s], dp.vm_i[s], dp.vm_ii[s], dp.vm_iii[s], dp.km_i[s], dp.km_ii[s],
+                       dp.km_iii[s], dp.hm_i[s], dp.hm_ii[s], dp.hm_iii[s]);
+      }
+      if (g_miss_cap > 0 && !g_miss_path.empty()) {
+        std::ofstream mf(g_miss_path);
+        mf << "seen V " << g_miss_seen[0] << " K " << g_miss_seen[1] << " H " << g_miss_seen[2]
+           << "\n";
+        static const char kn[3] = {'V', 'K', 'H'};
+        for (int k = 0; k < 3; ++k)
+          for (const MissRec& r : g_miss[k])
+            mf << kn[k] << " " << r.st << " " << r.x << " " << r.y << " " << r.b << "\n";
+      }
+      std::fprintf(stderr,
+                   "[times] n %d pass1 %.3f pass2 %.3f scan %.3f wall %.3f "
+                   "pass1_s_nt %.6f pass2_s_nt %.6f scan_s_nt %.6f wall_s_nt %.6f\n",
+                   static_cast<int>(seq.size()), pass1_s, pass2_s, scan_s - dp.rfv_sec, wall_s,
+                   pass1_s / ntd, pass2_s / ntd, (scan_s - dp.rfv_sec) / ntd, wall_s / ntd);
+      std::fprintf(stderr,
+                   "[vfb] sec %.4f calls %lld  Qz cand_per %.3f kept_per %.3f reads_per %.3f\n",
+                   dp.rfv_sec, dp.rfv_od, per(dp.qz_cand), per(dp.qz_kept), per(dp.qz_reads));
+      if (!dp.col_cnt.empty()) {
+        const int nc = static_cast<int>(dp.col_cnt.size());
+        const int a = (nc * 4) / 5;
+        auto tail = [&](auto get) {
+          long long prev = a > 0 ? get(dp.col_cnt[static_cast<size_t>(a - 1)]) : 0;
+          long long s = 0;
+          for (int j = a; j < nc; ++j) {
+            const long long v = get(dp.col_cnt[static_cast<size_t>(j)]);
+            s += v - prev;
+            prev = v;
+          }
+          return nc > a ? static_cast<double>(s) / (nc - a) : 0.0;
+        };
+        std::fprintf(stderr,
+                     "[pos20] n %d from %d int %.3f h %.3f ls %.3f rs %.3f tail %.3f "
+                     "edge %.3f qz_reads %.3f K %.3f qm_kept %.3f\n",
+                     nc, a, tail([](const DP03::ColCnt& c) { return c.iti; }),
+                     tail([](const DP03::ColCnt& c) { return c.ith; }),
+                     tail([](const DP03::ColCnt& c) { return c.itls; }),
+                     tail([](const DP03::ColCnt& c) { return c.itrs; }),
+                     tail([](const DP03::ColCnt& c) { return c.tail; }),
+                     tail([](const DP03::ColCnt& c) { return c.edge; }),
+                     tail([](const DP03::ColCnt& c) { return c.qz; }),
+                     tail([](const DP03::ColCnt& c) { return c.k; }),
+                     tail([](const DP03::ColCnt& c) { return c.qm; }));
+      }
+      {
+        std::vector<MemItem> mit;
+        dp.mem_items(mit, "", true, pk_l2r != 0);
+        stem_mem_items(stem, mit);
+        double tot = 0;
+        for (const MemItem& m : mit) tot += m.bytes;
+        std::fprintf(stderr, "[mem-nt] n %d total_mb %.3f total_mb_nt %.6f",
+                     static_cast<int>(seq.size()), tot / 1048576.0, tot / 1048576.0 / ntd);
+        for (const MemItem& m : mit) {
+          if (m.bytes < 1024.0 && m.ents == 0) continue;
+          std::fprintf(stderr, " %s %lld %.3f %.6f", m.name.c_str(), m.ents, m.bytes / 1048576.0,
+                       m.bytes / 1048576.0 / ntd);
+        }
+        std::fprintf(stderr, "\n");
+      }
+      dp.log_nest("scan");
+      if (dp.rlt) {
+        std::fprintf(stderr, "[rlt] n %d beam %d kept_per %.3f max %d\n", static_cast<int>(seq.size()),
+                     dp.rlt_beam, per(dp.rlt_kept), dp.rlt_max);
+        std::fprintf(stderr, "[rlt-fam] R %lld max %d U %lld max %d\n", dp.rlt_kept_f[0], dp.rlt_max_f[0],
+                     dp.rlt_kept_f[1], dp.rlt_max_f[1]);
+        const int rn = static_cast<int>(dp.rlt_pos[0].size());
+        const int un = static_cast<int>(dp.rlt_pos[1].size());
+        const int pn = std::max(rn, un);
+        for (int j = 0; j < pn; ++j) {
+          const int rv = j < rn ? dp.rlt_pos[0][j] : 0;
+          const int uv = j < un ? dp.rlt_pos[1][j] : 0;
+          if (rv || uv)
+            std::fprintf(stderr, "[rlt-pos] %d %d %d\n", j, rv, uv);
+        }
+      }
       if (dp.l2r_inc) {
         long long st[3] = {};
         for (int k = 0; k < 3; ++k)
@@ -18930,6 +22390,7 @@ int main(int argc, char** argv) {
                    sid.c_str(), static_cast<int>(seq.size()), dp.l2r_beam, dp.l2r_spawn_k,
                    static_cast<int>(seq.size()), b.c_str(), dp.l2r_csec, bs, ps, dp.l2r_isec,
                    dp.sp_events, dp.sp_cand, dp.sp_kept, dp.l2r_beam > 0 ? dp.l2r_arms() : 0);
+      dp.scan_ct_dump();
       if (dp.l2r_beam > 0 && !partial)
         std::fprintf(stderr,
                      "[l2r-spawn] %s n %d mode %s w %s k %d pool %d maxpop %d events %lld cand %lld "
@@ -19473,5 +22934,6 @@ int main(int argc, char** argv) {
   }
   if (diag_f) std::fclose(diag_f);
   if (stem_diag_f) std::fclose(stem_diag_f);
+  g_beam_stats.close();
   return 0;
 }
