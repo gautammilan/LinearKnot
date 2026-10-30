@@ -13,18 +13,19 @@
 \newcommand{\tofill}[1]{\textcolor{red}{\textbf{[tofill: #1]}}}
 \title{LinearKnot project notebook}
 \author{Milan Gautam and collaborators}
-\date{Version 1.2 \quad 2026-10-29}
+\date{Version 1.3 \quad 2026-10-29}
 \begin{document}
 \maketitle
 
 \section*{Changelog}
 \begin{itemize}[leftmargin=*]
+  \item \textbf{1.3} (2026-10-29). Folded F floor+\texttt{--k-exact} and Pseu~(a) numbers; launched D (16-seq fixed sweep) and C (HXB2 cost) with \texttt{dp03\_fixlam\_sweep}@\texttt{ca8cd5e}.
   \item \textbf{1.2} (2026-10-29). Cursor Task~N: authored notebook on \texttt{fix-lambda}, filled gaps from repo and \texttt{/tmp/new\_exactness}, added F ladders and floor, wrote Q1 with evidence search outcome. Commit of this PDF follows the build.
   \item \textbf{1.1}. Claude draft skeleton with red \texttt{\textbackslash tofill} markers (source was not on disk in the Cursor workspace; this file replaces it).
 \end{itemize}
 
 \section{Status}
-Branch \texttt{fix-lambda}. Sweep L-truncation fix is committed as \texttt{ca8cd5e} (q'-aware intermediate \texttt{cap\_ga}, \texttt{ntr\_init} before \texttt{sw\_fill}, default \texttt{--sweep on}). Exactness workstream: A--E and F beam ladders under \texttt{/tmp/new\_exactness}. Floor exact-K reruns for Deha / Shew.frig and Pseu at old flags~(a) were still running when this section was written; List exact-K finished.
+Branch \texttt{fix-lambda}. Sweep L-truncation fix is committed as \texttt{ca8cd5e} (q'-aware intermediate \texttt{cap\_ga}, \texttt{ntr\_init} before \texttt{sw\_fill}, default \texttt{--sweep on}). Exactness workstream A--F complete under \texttt{/tmp/new\_exactness}; campaigns D (16-seq fixed-sweep validation) and C (HXB2 pass-2 cost) relaunched 2026-10-29 with binary \texttt{/tmp/new\_exactness/bin/dp03\_fixlam\_sweep} (prior partial D/C used a pre-fix binary or left empty outs).
 
 \section{Paper setting (current default path)}
 Unless an experiment says otherwise, the paper-facing linear pass-2 command is the expanded \texttt{--preset default} block in \texttt{cpp/dp03\_l2r\_merged.cpp} (energy model separate), plus the post-\texttt{ca8cd5e} defaults \texttt{--sweep on} and \texttt{--v-sweep on}. Material for the tmRNA campaigns: \texttt{--material rna1999 --dangles some} with \texttt{dp03/params/rna1999.dG}.
@@ -200,7 +201,30 @@ List.seel & 167.01972 & 0.83950 & 1421.0 & 5427596 \\
 \end{tabular}
 \end{center}
 
-Floor $|d\log Z|{>}0.3$: Deha, Shew.frig, List. Exact-K option \texttt{--k-exact} exists in CLI. List+\texttt{--k-exact}: $|d\log Z|{=}0.83845$ (wall 1502\,s, RSS 5608768\,KB), $\Delta$ vs floor $-0.00106$. Deha/Shew.frig exact-K and Pseu at pure (a) (\texttt{--b1 0}): \tofill{still running or not yet in dumps when notebook built; re-read F/dumps}.
+Floor $|d\log Z|{>}0.3$: Deha, Shew.frig, List. Exact-K option \texttt{--k-exact} exists in CLI.
+
+\paragraph{F.3b Floor + \texttt{--k-exact} (seqs with floor $|d|{>}0.3$).}
+From \texttt{F/REPORT.md} / dumps \texttt{3\_floor\_kx\_*} (finished 2026-10-29 21:33--21:44).
+
+\begin{center}
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+seq & $|d\log Z|$ & wall (s) & RSS (KB) & $\Delta$ vs floor \\
+\midrule
+Deha.ethe & 0.31138 & 1894.8 & 6820088 & $-0.25414$ \\
+Shew.frig & 0.06862 & 2121.7 & 6973800 & $-0.70838$ \\
+List.seel & 0.83845 & 1502.1 & 5608768 & $-0.00106$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\texttt{--k-exact} nearly closes Shew.frig and cuts Deha by ${\sim}0.25$; List is essentially unchanged.
+
+\paragraph{F.4 NEW at E-flags (a) on Pseu.aeru.}
+\texttt{--b1 0}, other (a) flags, sweep on, no bpp. Dump \texttt{4\_a\_pseu}: $|d\log Z|{=}0.25043$, wall 727.3\,s, RSS 2654296\,KB. OLD hard14 from E: $|d|{=}0.24821$. NEW matches OLD to ${\sim}0.002$ on this point.
+
+\paragraph{F takeaway for D/C.}
+b4 moves $|d|$; bV flat in the tested range; floor still leaves Deha/List residuals; paper validation D stays on linp2 default/accurate with fixed sweep (same flags as A, \texttt{--sweep on}). C measures HXB2 pass-2 cost under those default flags, sweep off vs on.
 
 \section{ArchiveII RMSD run arch17\_vg/v256\_g32\_A}
 \tofill{path and whether that run used sweep before ca8cd5e; no arch17\_vg/v256\_g32\_A directory found under the repo or /tmp in Task~N search}.
@@ -223,10 +247,9 @@ We do not have on-disk evidence that the NL4-3 b4=1000${\to}$3000 $\log Z$ drop 
 
 \section{Next steps}
 \begin{enumerate}[leftmargin=*]
-  \item Finish F exact-K (Deha, Shew.frig) and Pseu~(a); fold numbers into this notebook.
-  \item Choose E/F settings for campaigns D/C (deferred until E/F settings chosen).
+  \item Wait for D (16-seq default+accurate, fixed sweep ON, bpp on) and C (HXB2 $n\in\{1000,\ldots,9700\}$, sweep off/on); fold tables into this notebook.
   \item Revisit Q1 only with a logged b2 ablation on NL4-3, or locate the original HIV run directory.
-  \item After each finished slice of Task~D, append an experiment entry under the notebook rule.
+  \item After each finished slice of Task~D/C, append an experiment entry under the notebook rule.
 \end{enumerate}
 
 \end{document}
