@@ -36,3 +36,38 @@ RNase P 1-150, paper preset, `--bG 10000000` (pre max = post max on both, so the
 | states − direct | −1.029e-5 |
 
 Threshold was 1e-9. Steps 4 and 5 were not run.
+
+## Correction: logZ was the wrong test — outside identity instead
+
+`--out-id` (RNase P 1-150, paper preset, `--bV 10000000 --bG 10000000`). For each kept end_ok pair,
+compare the reconstructed outside to pass 1's `Qb_b`. Stop term is `E.at(x,y)`, the exterior-loop
+pair factor pass 1 adds into `Qb_b`.
+
+| table | pairs | max rel | median rel |
+|---|---:|---:|---:|
+| V | 2948 | 7.8e-13 | 5.7e-14 |
+| G states | 2948 | 7.4e-13 | 5.7e-14 |
+| G direct | 4045 | 1e300 (pairs with no Qb_b) | 0.715 |
+
+G direct does not satisfy the identity: it walks `pr_steps` (pseudoknot-stem multiloop
+parameters, `PrMbar` = nested Qm, pair_bonus), not the nested grammar.
+
+States vs direct, uncapped, per entry: 1,925,690 in both, 48,426 only in states, 0 only in direct,
+max relative difference 2.8e9.
+
+V does not push one multiloop twice. In the nested pre-pass (`l2r_mode == 0`) the pair→Qm2 close
+(E9, `l2r_mode != 0`) is off; the close goes pair→Multi (also counted as E9), then Multi→Qm2 (E3 multi)
+and Multi→Multi (E4 multi-ext). E5–E8 are branch edges Qm/Qm2→pair. V's identity at 7.8e-13 confirms.
+
+## Paper matrix (bG as listed; signed dlogZ vs topq bG 32)
+
+| seq | direct entries 128 | states 128 | G pushes topq / direct / states | G fill s topq / direct / states | scan CPU s topq / direct / states | peak RSS MB topq / direct / states |
+|---|---:|---:|---|---|---|---|
+| Ther | -0.0004 | **-12.615** | 22.5M / 22.6M / 9.7M | 1617 / 254 / 90 | 1738 / 393 / 137 | 3212 / 1489 / 1471 |
+| Deha | +0.0012 | +0.0004 | 21.0M / 21.1M / 9.7M | 1260 / 230 / 85 | 1387 / 378 / 145 | 3036 / 1516 / 1496 |
+| Pseu | -0.0005 | -0.0074 | 20.2M / 20.2M / 9.3M | 1194 / 249 / 103 | 1371 / 486 / 239 | 2892 / 1517 / 1543 |
+| RP150 | -0.0000 | -0.0000 | 2.35M / 2.38M / 1.27M | 33 / 15 / 7.5 | 54 / 37 / 23 | 509 / 441 / 438 |
+| RP486 | +0.1055 | +0.2743 | running / 49.1M / 20.7M | running / 594 / 236 | running / 1061 / 481 | running / 2496 / 2732 |
+
+RP486 topq logZ from the earlier gcut matrix (440.02910384486495); the rerun is still going.
+NUPACK refs: Ther 327.5433 (topq -0.146, direct -0.146, states -12.761), Deha 235.1604, Pseu 215.7890.

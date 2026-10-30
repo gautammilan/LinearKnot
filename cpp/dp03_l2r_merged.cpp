@@ -240,6 +240,9 @@ enum { G_CUT_TOPQ = 0, G_CUT_COLLAPSE = 1, G_CUT_ENTRIES = 2 };
 static int g_cut = G_CUT_TOPQ;
 enum { G_SWEEP_DIRECT = 0, G_SWEEP_STATES = 1 };
 static int g_sweep = G_SWEEP_DIRECT;
+// --out-id: compare reconstructed outsides to pass-1 Qb_b. Stop term uses E.at,
+// the exterior-loop pair factor pass 1 adds into Qb_b (this check only; production seed is the same E.at).
+static bool g_out_id = false;
 // --grow-node-trunc-r KR: K of the R side (0: K; -1: R not truncated, stored dense in R[0], the
 // layers summed)
 static int g_ntr_KR = 0;
@@ -3173,10 +3176,12 @@ class DP03 {
         if (i < 0) continue;
         M& m = pairs[key2(i, j)];
         if (E.end_ok(i, j)) {
-          if (do_g) add1(m.g, key2(i, j), E.at(i, j));
+          // Exterior-loop pair factor. --out-id uses pass 1's E.at, which is also the production seed.
+          const double e_out = E.at(i, j);
+          if (do_g) add1(m.g, key2(i, j), e_out);
           if (do_v) {
             const double sb = st.prS[static_cast<size_t>(j + 1)];
-            if (sb > HALF_NEG) add1(m.v, key2(i, 0), E.at(i, j) + sb);
+            if (sb > HALF_NEG) add1(m.v, key2(i, 0), e_out + sb);
           }
         }
         cap_m(m);
@@ -3277,6 +3282,66 @@ class DP03 {
     st.pr_sw_states_g = st_g;
     st.pr_sw_states_v = st_v;
     st.pr_sw_pushes = pushes;
+    if (g_out_id) st.prQb_b = Qb_b.dense();
+    auto out_rel = [](double a, double b) {
+      if (a < HALF_NEG && b < HALF_NEG) return 0.0;
+      if (a < HALF_NEG || b < HALF_NEG) return 1e300;
+      return std::fabs(std::expm1(a - b));
+    };
+    auto out_id_one = [&](const char* tag, bool fold_s,
+                          const std::unordered_map<uint64_t, std::unordered_map<uint64_t, double>>& maps) {
+      if (!g_out_id) return;
+      std::vector<double> err;
+      err.reserve(static_cast<size_t>(n));
+      int worst_i = -1, worst_j = -1;
+      for (int j = 0; j < n; ++j) {
+        for (size_t r = 0; r < Qb_at[j].slots(); ++r) {
+          const int i = Qb_at[j].keys[r];
+          if (i < 0 || !E.end_ok(i, j)) continue;
+          const double ref = Qb_b[ix(i, j)];
+          double got = NEG_INF;
+          auto it = maps.find(key2(i, j));
+          if (it != maps.end()) {
+            for (const auto& [bk, w] : it->second) {
+              if (w < HALF_NEG) continue;
+              const int p = k_hi(bk);
+              const int q = k_lo(bk);
+              double t = w;
+              if (p > 0) t += C[static_cast<size_t>(p - 1)];
+              if (fold_s) {
+                if (q + 1 < 0 || q + 1 >= static_cast<int>(st.prS.size())) continue;
+                const double sb = st.prS[static_cast<size_t>(q + 1)];
+                if (sb < HALF_NEG) continue;
+                t += sb;
+              }
+              got = log_add(got, t);
+            }
+          }
+          if (got < HALF_NEG && ref < HALF_NEG) continue;
+          const double d = out_rel(got, ref);
+          if (err.empty() || d > err.front()) {
+            // track max separately
+          }
+          err.push_back(d);
+          if (worst_i < 0 || d > out_rel(0, 0) && d >= err.back()) {
+            worst_i = i;
+            worst_j = j;
+          }
+        }
+      }
+      double mx = 0, med = 0;
+      if (!err.empty()) {
+        mx = *std::max_element(err.begin(), err.end());
+        std::nth_element(err.begin(), err.begin() + static_cast<long>(err.size() / 2), err.end());
+        med = err[err.size() / 2];
+      }
+      std::fprintf(stderr, "[out-id] %s pairs %zu max_rel %.3e med_rel %.3e\n", tag, err.size(), mx,
+                   med);
+      (void)worst_i;
+      (void)worst_j;
+    };
+    if (g_out_id && do_v) out_id_one("V", false, st.prMu);
+    if (g_out_id && do_g) out_id_one("G-states", true, st.prGamma);
     st.pr_mbar_max = std::max(st.pr_mbar_max, qm_max);
     st.pr_sw_sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     std::fprintf(stderr,
@@ -10734,6 +10799,78 @@ class DP03 {
             sw_ga_ent_sum += e;
             if (e > sw_ga_ent_max) sw_ga_ent_max = e;
           }
+        }
+        if (g_out_id && stem_ && !stem_->prQb_b.empty()) {
+          // Side fill of the direct path so states and direct can be compared uncapped.
+          sw_fill(0, n);
+          auto rel = [](double a, double b) {
+            if (a < HALF_NEG && b < HALF_NEG) return 0.0;
+            if (a < HALF_NEG || b < HALF_NEG) return 1e300;
+            return std::fabs(std::expm1(a - b));
+          };
+          auto sum_g = [&](const std::unordered_map<uint64_t, double>* src) {
+            double got = NEG_INF;
+            if (!src) return got;
+            for (const auto& [bk, w] : *src) {
+              if (w < HALF_NEG) continue;
+              const int p = k_hi(bk), q = k_lo(bk);
+              double t = w;
+              if (p > 0 && !stem_->prC.empty()) t += stem_->prC[static_cast<size_t>(p - 1)];
+              if (q + 1 < 0 || q + 1 >= static_cast<int>(stem_->prS.size())) continue;
+              const double sb = stem_->prS[static_cast<size_t>(q + 1)];
+              if (sb < HALF_NEG) continue;
+              t += sb;
+              got = log_add(got, t);
+            }
+            return got;
+          };
+          std::vector<double> err;
+          const int nn = n * n;
+          for (int j = 0; j < n; ++j) {
+            for (int i = 0; i < n; ++i) {
+              const double ref = stem_->prQb_b[static_cast<size_t>(i) * n + j];
+              const auto it = sw_ga[0].find(key2(i, j));
+              const std::unordered_map<uint64_t, double>* src = it == sw_ga[0].end() ? nullptr : &it->second;
+              if ((src == nullptr || src->empty()) && ref < HALF_NEG) continue;
+              if (ref < HALF_NEG && src == nullptr) continue;
+              err.push_back(rel(sum_g(src), ref));
+            }
+          }
+          (void)nn;
+          double mx = 0, med = 0;
+          if (!err.empty()) {
+            mx = *std::max_element(err.begin(), err.end());
+            std::nth_element(err.begin(), err.begin() + static_cast<long>(err.size() / 2), err.end());
+            med = err[err.size() / 2];
+          }
+          std::fprintf(stderr, "[out-id] G-direct pairs %zu max_rel %.3e med_rel %.3e\n", err.size(),
+                       mx, med);
+          long long only_s = 0, only_d = 0, both = 0;
+          double max_e = 0;
+          std::unordered_set<uint64_t> seen;
+          for (const auto& [pk, sg] : stem_->prGamma) {
+            seen.insert(pk);
+            auto it = sw_ga[0].find(pk);
+            if (it == sw_ga[0].end()) {
+              only_s += static_cast<long long>(sg.size());
+              continue;
+            }
+            for (const auto& [k, w] : sg) {
+              auto jt = it->second.find(k);
+              if (jt == it->second.end()) ++only_s;
+              else {
+                ++both;
+                max_e = std::max(max_e, rel(w, jt->second));
+              }
+            }
+            for (const auto& kv : it->second)
+              if (!sg.count(kv.first)) ++only_d;
+          }
+          for (const auto& [pk, dg] : sw_ga[0])
+            if (!seen.count(pk)) only_d += static_cast<long long>(dg.size());
+          std::fprintf(stderr,
+                       "[g-entry] both %lld only_states %lld only_direct %lld max_rel %.3e\n", both,
+                       only_s, only_d, max_e);
         }
       }
     }
@@ -21011,6 +21148,7 @@ int main(int argc, char** argv) {
         return 2;
       }
     }
+    else if (arg == "--out-id") g_out_id = true;
     else if (arg == "--grow-node-trunc-r") {
       g_ntr_KR = std::max(-1, std::atoi(next()));
     }
