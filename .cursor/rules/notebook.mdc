@@ -1,0 +1,16 @@
+---
+description: Maintain the LinearKnot project notebook PDF after experiments and conclusions
+alwaysApply: true
+---
+
+At the end of every task that runs an experiment, changes code or
+flags, or reaches a conclusion, update docs/notebook/
+linearknot_notebook.tex: add or update the experiment entry
+(question, binary path, commit, branch, full flag dump, sequences,
+numbers, conclusion, output directory), update the status, the
+paper setting, the open questions and the next steps if they
+changed, bump the minor version, and add a changelog line. Rebuild
+the PDF and commit the .tex and the PDF together. Never fill a gap
+from memory: if a fact is not in a file, log, commit or command
+output, leave it as \tofill{...}. Keep the house style: no em
+dashes, math in black, define every symbol, first-person 'we'.
