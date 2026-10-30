@@ -60,6 +60,9 @@
 // --bG N: growth node trunc K (was --grow-node-trunc). Unset: 16 when grow-rec defaults apply.
 // --g-cut topq|collapse|entries: sw_fill node cap (default topq). topq = all p' for top-bG q';
 //   collapse = Ghat of size bG; entries = top-bG raw (p',q') by C_pre*G*S_pre.
+// --g-sweep direct|states (default direct): how G is built for growth reads.
+//   direct = sw_fill (pair→pair via PrMbar); states = sw_hyper_push do_g on Qm/Qm2/pair (E1–E9),
+//   cut every state to bG entries by C_pre*G*S_pre; scan still applies Chat at read.
 // --qzbar-old: build StemEst Qzbar as the Oct-8/incperf path does — dense full nested Qz→prQz,
 //   no beamed sparse Qz_pre (qz_on). Used by H_ex, K_L, pr_sf_build, and every other Qzbar read.
 // --b1 N: --nest-beam N, the nested pre-pass and the stem-estimate run at every length.
@@ -235,6 +238,8 @@ static FILE* g_mass_f = nullptr;
 //   entries:  pass2_push_edges — top-bG raw (p',q') by C_pre(p'-1)*G*S_pre(q'+1).
 enum { G_CUT_TOPQ = 0, G_CUT_COLLAPSE = 1, G_CUT_ENTRIES = 2 };
 static int g_cut = G_CUT_TOPQ;
+enum { G_SWEEP_DIRECT = 0, G_SWEEP_STATES = 1 };
+static int g_sweep = G_SWEEP_DIRECT;
 // --grow-node-trunc-r KR: K of the R side (0: K; -1: R not truncated, stored dense in R[0], the
 // layers summed)
 static int g_ntr_KR = 0;
@@ -2781,7 +2786,9 @@ class DP03 {
       Ga g, v, b;
       bool empty() const { return g.empty() && v.empty() && b.empty(); }
     };
-    const bool do_g = false;
+    // Nested pre-pass has l2r_mode==0 (scan's --pk-l2r does not apply here). Multi edges E3/E4
+    // multi fire on that path. --g-sweep states turns G on beside V.
+    const bool do_g = (g_sweep == G_SWEEP_STATES);
     const bool do_v = p2_vsweep;
     const bool do_b = sw_check && p2_vsweep && p2_v_cap <= 0 && g_ntr_K <= 0;
     const int Kg = g_ntr_K, Kv = p2_v_cap;
@@ -2813,7 +2820,10 @@ class DP03 {
     } g_at, v_at, g_pre, v_pre, g_kept, v_kept;
     auto scale_into = [&](M& d, const M& s, double a) {
       if (a < HALF_NEG || s.empty()) return;
-      auto one = [&](Ga& dd, const Ga& ss) {
+      auto one = [&](Ga& dd, const Ga& ss, double& sec, long long* cnt, Hist* hist) {
+        if (ss.empty()) return;
+        if (hist) hist->add(ss.size());
+        const auto t0 = std::chrono::steady_clock::now();
         for (const auto& [k, v] : ss) {
           if (v < HALF_NEG) continue;
           const double w = a + v;
@@ -2821,72 +2831,99 @@ class DP03 {
           if (it == dd.end()) dd.emplace(k, w);
           else it->second = log_add(it->second, w);
         }
+        sec += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        if (cnt) ++*cnt;
       };
-      if (do_g) one(d.g, s.g);
-      if (do_v) one(d.v, s.v);
-      if (do_b) one(d.b, s.b);
+      if (do_g) one(d.g, s.g, g_merge_sec, &g_pushes, &g_at);
+      if (do_v) one(d.v, s.v, v_merge_sec, &v_pushes, &v_at);
+      if (do_b) {
+        double ignore = 0;
+        one(d.b, s.b, ignore, nullptr, nullptr);
+      }
     };
     auto push_to = [&](M& d, const M& s, double a) {
       if (a < HALF_NEG || s.empty()) return;
-      if (do_g && !s.g.empty()) g_at.add(s.g.size());
-      if (do_v && !s.v.empty()) v_at.add(s.v.size());
       scale_into(d, s, a);
       ++pushes;
     };
     auto cap_ga = [&](Ga& m) {
+      const long long pre = static_cast<long long>(m.size());
       g_pre.add(m.size());
-      if (Kg <= 0 || static_cast<int>(m.size()) <= Kg) return;
-      struct E {
-        uint64_t k;
-        double w, s;
-      };
-      std::vector<E> v;
-      v.reserve(m.size());
-      for (const auto& [k, w] : m) {
-        if (w < HALF_NEG) continue;
-        const int p = k_hi(k), q = k_lo(k);
-        double s = w;
-        if (p > 0 && !st.prC.empty()) s += st.prC[static_cast<size_t>(p - 1)];
-        const double sb = st.prS[static_cast<size_t>(q + 1)];
-        if (sb < HALF_NEG) continue;
-        s += sb;
-        v.push_back({k, w, s});
+      ++g_pre_n;
+      g_pre_sum += pre;
+      if (pre > g_pre_max) g_pre_max = pre;
+      const auto tc0 = std::chrono::steady_clock::now();
+      // --g-sweep states: always entries cut by C_pre * G * S_pre (bG = Kg).
+      if (Kg > 0 && static_cast<int>(m.size()) > Kg) {
+        struct E {
+          uint64_t k;
+          double w, s;
+        };
+        std::vector<E> v;
+        v.reserve(m.size());
+        for (const auto& [k, w] : m) {
+          if (w < HALF_NEG) continue;
+          const int p = k_hi(k), q = k_lo(k);
+          double s = w;
+          if (p > 0 && !st.prC.empty()) s += st.prC[static_cast<size_t>(p - 1)];
+          if (q + 1 < 0 || q + 1 >= static_cast<int>(st.prS.size())) continue;
+          const double sb = st.prS[static_cast<size_t>(q + 1)];
+          if (sb < HALF_NEG) continue;
+          s += sb;
+          v.push_back({k, w, s});
+        }
+        if (static_cast<int>(v.size()) > Kg) {
+          std::nth_element(v.begin(), v.begin() + Kg, v.end(), [](const E& a, const E& b) {
+            if (a.s != b.s) return a.s > b.s;
+            return a.k < b.k;
+          });
+          v.resize(static_cast<size_t>(Kg));
+        }
+        m.clear();
+        for (const E& e : v) m.emplace(e.k, e.w);
       }
-      if (static_cast<int>(v.size()) > Kg) {
-        std::nth_element(v.begin(), v.begin() + Kg, v.end(), [](const E& a, const E& b) {
-          if (a.s != b.s) return a.s > b.s;
-          return a.k < b.k;
-        });
-        v.resize(static_cast<size_t>(Kg));
-      }
-      m.clear();
-      for (const E& e : v) m.emplace(e.k, e.w);
+      g_cut_sec += std::chrono::duration<double>(std::chrono::steady_clock::now() - tc0).count();
+      const long long post = static_cast<long long>(m.size());
+      ++g_post_n;
+      g_post_sum += post;
+      if (post > g_post_max) g_post_max = post;
     };
     auto cap_mu = [&](Ga& m) {
+      const long long pre = static_cast<long long>(m.size());
       v_pre.add(m.size());
-      if (Kv <= 0 || static_cast<int>(m.size()) <= Kv) return;
-      struct E {
-        uint64_t k;
-        double w, s;
-      };
-      std::vector<E> v;
-      v.reserve(m.size());
-      for (const auto& [k, w] : m) {
-        if (w < HALF_NEG) continue;
-        const int b = k_hi(k);
-        double s = w;
-        if (b > 0 && !st.prC.empty()) s += st.prC[static_cast<size_t>(b - 1)];
-        v.push_back({k, w, s});
+      ++v_pre_n;
+      v_pre_sum += pre;
+      if (pre > v_pre_max) v_pre_max = pre;
+      const auto tc0 = std::chrono::steady_clock::now();
+      if (Kv > 0 && static_cast<int>(m.size()) > Kv) {
+        struct E {
+          uint64_t k;
+          double w, s;
+        };
+        std::vector<E> v;
+        v.reserve(m.size());
+        for (const auto& [k, w] : m) {
+          if (w < HALF_NEG) continue;
+          const int b = k_hi(k);
+          double s = w;
+          if (b > 0 && !st.prC.empty()) s += st.prC[static_cast<size_t>(b - 1)];
+          v.push_back({k, w, s});
+        }
+        if (static_cast<int>(v.size()) > Kv) {
+          std::nth_element(v.begin(), v.begin() + Kv, v.end(), [](const E& a, const E& b) {
+            if (a.s != b.s) return a.s > b.s;
+            return a.k < b.k;
+          });
+          v.resize(static_cast<size_t>(Kv));
+        }
+        m.clear();
+        for (const E& e : v) m.emplace(e.k, e.w);
       }
-      if (static_cast<int>(v.size()) > Kv) {
-        std::nth_element(v.begin(), v.begin() + Kv, v.end(), [](const E& a, const E& b) {
-          if (a.s != b.s) return a.s > b.s;
-          return a.k < b.k;
-        });
-        v.resize(static_cast<size_t>(Kv));
-      }
-      m.clear();
-      for (const E& e : v) m.emplace(e.k, e.w);
+      v_cut_sec += std::chrono::duration<double>(std::chrono::steady_clock::now() - tc0).count();
+      const long long post = static_cast<long long>(m.size());
+      ++v_post_n;
+      v_post_sum += post;
+      if (post > v_post_max) v_post_max = post;
     };
     auto cap_m = [&](M& s) {
       if (do_g && !s.g.empty()) {
@@ -3243,14 +3280,18 @@ class DP03 {
     st.pr_mbar_max = std::max(st.pr_mbar_max, qm_max);
     st.pr_sw_sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     std::fprintf(stderr,
-                 "[sweep-kept] maps qm %lld bad %lld qm2 %lld bad %lld pair %lld bad %lld\n",
-                 hk_map[0], hk_bad[0], hk_map[1], hk_bad[1], hk_map[2], hk_bad[2]);
+                 "[sweep-kept] l2r_mode %d allow_pk %d maps qm %lld bad %lld qm2 %lld bad %lld "
+                 "pair %lld bad %lld\n",
+                 l2r_mode, allow_pk ? 1 : 0, hk_map[0], hk_bad[0], hk_map[1], hk_bad[1], hk_map[2],
+                 hk_bad[2]);
     static const char* ename[12] = {"E1 qm-ext", "E2 qm2-ext", "E3 interior", "E4 exterior",
                                     "E5 branch1", "E6 branch-qm-pair", "E7 branch-qm-tail",
                                     "E8 branch-qm2-pair", "E8 branch-qm2-tail", "E9 close",
                                     "E3 multi", "E4 multi-ext"};
     for (int e = 0; e < 12; ++e)
       std::fprintf(stderr, "[sweep-kept] %s push %lld bad %lld\n", ename[e], hk_e[e], hk_eb[e]);
+    // E3 multi / E4 multi-ext are the nested pre-pass Multi tables (l2r_mode==0). The scan's
+    // --pk-l2r on does not change np.l2r_mode; those edges are expected here.
     if (do_v && p2_v_cap <= 0 && g_ntr_K <= 0 && !Qb_b.empty()) {
       auto rel = [](double a, double b) {
         if (a < HALF_NEG && b < HALF_NEG) return 0.0;
@@ -3882,6 +3923,23 @@ class DP03 {
   double sw_ntr_init_sec = 0.0, sw_fill_sec = 0.0, sw_as_rn_sec = 0.0;
   long long sw_as_rn_calls = 0, sw_as_rn_ent_in = 0, sw_as_rn_ent_out = 0;
   long long sw_ga_nodes = 0, sw_ga_ent_sum = 0, sw_ga_ent_max = 0;
+  // V/G fill split (pass-2 V sweep vs scan sw_fill).
+  double v_merge_sec = 0.0, v_cut_sec = 0.0, g_merge_sec = 0.0, g_cut_sec = 0.0;
+  long long v_pushes = 0, g_pushes = 0;
+  long long v_pre_n = 0, v_pre_sum = 0, v_pre_max = 0, v_post_n = 0, v_post_sum = 0, v_post_max = 0;
+  long long g_pre_n = 0, g_pre_sum = 0, g_pre_max = 0, g_post_n = 0, g_post_sum = 0, g_post_max = 0;
+  // sw_fill multiloop linearity: right-gap yo visits attributed to each pair at column y.
+  long long ml_yo_qm_n = 0, ml_yo_qm_sum = 0, ml_yo_qm_max = 0;
+  long long ml_yo_sc_n = 0, ml_yo_sc_sum = 0, ml_yo_sc_max = 0;
+  int ml_yo_S = 0;
+  bool ml_yo_qm_ix = false;
+  // K_L inside growth reads (lsc_L) and per-arm (b,c) V/K stats.
+  double kl_in_read_sec = 0.0;
+  long long arm_read_n = 0;
+  long long arm_Vf_sum = 0, arm_Vf_max = 0;
+  std::vector<int> arm_Vf_samples;  // for median
+  long long arm_Kq_sum = 0, arm_Kq_max = 0;
+  std::vector<char> arm_seen;
   // steps of the built nodes by kind: [0] growth nodes + roots, [1] future stems;
   // [.][0] interior, [.][1] multiloop.  Partner terms: wall time of the outermost T / K /
   // Stop build.  stop_j: the step at which a CPU-limit stop was taken (-1: none).
@@ -7501,8 +7559,9 @@ class DP03 {
   // Left Qm is the nested pre-pass. Self is at(x, y), prefix not stored.
   void sw_fill(int slot, int rf) {
     using Ga = std::unordered_map<uint64_t, double>;
-    auto add_ga = [](Ga& d, const Ga& s, double a) {
-      if (a < HALF_NEG) return;
+    auto add_ga = [&](Ga& d, const Ga& s, double a) {
+      if (a < HALF_NEG || s.empty()) return;
+      const auto tm0 = std::chrono::steady_clock::now();
       for (const auto& [k, v] : s) {
         if (v < HALF_NEG) continue;
         const double w = a + v;
@@ -7510,6 +7569,8 @@ class DP03 {
         if (it == d.end()) d.emplace(k, w);
         else it->second = log_add(it->second, w);
       }
+      g_merge_sec += std::chrono::duration<double>(std::chrono::steady_clock::now() - tm0).count();
+      ++g_pushes;
     };
     auto add1 = [](Ga& d, uint64_t k, double w) {
       if (w < HALF_NEG) return;
@@ -7520,8 +7581,23 @@ class DP03 {
     const StemEst& st = *stem_;
     // Cap a pair's map before it is pushed (--g-cut). See g_cut enum at file scope.
     auto cap_ga = [&](Ga& m) {
+      const long long pre = static_cast<long long>(m.size());
+      ++g_pre_n;
+      g_pre_sum += pre;
+      if (pre > g_pre_max) g_pre_max = pre;
+      const auto tc0 = std::chrono::steady_clock::now();
+      auto finish = [&]() {
+        g_cut_sec += std::chrono::duration<double>(std::chrono::steady_clock::now() - tc0).count();
+        const long long post = static_cast<long long>(m.size());
+        ++g_post_n;
+        g_post_sum += post;
+        if (post > g_post_max) g_post_max = post;
+      };
       const int K = g_ntr_K;
-      if (K <= 0 || m.empty()) return;
+      if (K <= 0 || m.empty()) {
+        finish();
+        return;
+      }
       if (g_cut == G_CUT_ENTRIES) {
         // Top-K raw (p',q') by C_pre(p'-1) * G * S_pre(q'+1). Scan still applies Chat at read.
         struct E {
@@ -7552,6 +7628,7 @@ class DP03 {
         out.reserve(v.size());
         for (const E& e : v) out.emplace(e.k, e.w);
         m.swap(out);
+        finish();
         return;
       }
       // topq and collapse: rank by q' with Ghat[q'] = sum_p' G*C_pre (+ ntrUL / Sbar).
@@ -7595,6 +7672,7 @@ class DP03 {
         out.reserve(v.size());
         for (const E& e : v) out.emplace(key2(0, e.q), e.g);
         m.swap(out);
+        finish();
         return;
       }
       // topq: retain all raw (p',q') mass for the kept q'.
@@ -7608,6 +7686,7 @@ class DP03 {
         if (keep.count(k_lo(k))) out.emplace(k, w);
       }
       m.swap(out);
+      finish();
     };
     std::vector<char> fin(static_cast<size_t>(n), 0);
     const int S = pr_ml_span;
@@ -7629,6 +7708,8 @@ class DP03 {
     std::unordered_map<int, Ga> long_acc;
     const bool full_rf = rf >= n - 1;
     const bool qm_ix = static_cast<int>(st.prMbarRight.size()) == n;
+    ml_yo_S = S;
+    ml_yo_qm_ix = qm_ix;
     for (int y = n - 1; y >= 0; --y) {
       std::unordered_map<int, Ga> gap0, gap1, glong_win, rq;
       auto fold = [&](int yo, std::unordered_map<int, Ga>& dst, double extra) {
@@ -7661,16 +7742,21 @@ class DP03 {
           fold(yo, glong_win, (dz ? E.d3w[yo - 1] : 0.0) + E.w_cp * (yo - 1));
       }
       auto& glong = full_rf ? long_acc : glong_win;
+      // Right-gap yo count for this column (each pair ending at y receives this many).
+      long long n_yo_qm = 0, n_yo_sc = 0;
       if (qm_ix) {
         if (y + 1 < n)
           for (int j : st.prMbarRight[static_cast<size_t>(y + 1)]) {
             if (j < y + 1) continue;
             if (j > y + S) break;
+            ++n_yo_qm;
             add_rq(j + 1, st.PrMbar(y + 1, j));
           }
       } else {
-        for (int yo = y + 2; yo < n && yo - y - 1 <= S; ++yo)
+        for (int yo = y + 2; yo < n && yo - y - 1 <= S; ++yo) {
+          ++n_yo_sc;
           add_rq(yo, st.PrMbar(y + 1, yo - 1));
+        }
       }
       // The right-gap sums are not pair states, but each inner pair copies them.
       // Cut each one to n_G first, with the same key as a pair map. long_acc stays cut,
@@ -7685,6 +7771,18 @@ class DP03 {
       const double ls = (dz && y + 1 < n ? E.d5w[y + 1] : 0.0) - E.w_cp * y;
       for (int x : xs_at[y]) {
         if (!E.end_ok(x, y)) continue;
+        // Full-span slot only (the second sw_fill is the short inner window).
+        if (full_rf && E.end_ok(x, y)) {
+          if (qm_ix) {
+            ++ml_yo_qm_n;
+            ml_yo_qm_sum += n_yo_qm;
+            if (n_yo_qm > ml_yo_qm_max) ml_yo_qm_max = n_yo_qm;
+          } else {
+            ++ml_yo_sc_n;
+            ml_yo_sc_sum += n_yo_sc;
+            if (n_yo_sc > ml_yo_sc_max) ml_yo_sc_max = n_yo_sc;
+          }
+        }
         const double br = E.w_bp + E.at(x, y);
         if (br < HALF_NEG) continue;
         Ga& dst = pg[key2(x, y)];
@@ -10597,29 +10695,46 @@ class DP03 {
     }
   }
   // One root from the swept gamma. g at q' already includes the scan prefix, as rec_root stores it.
+  bool sw_g_ready = false;  // one-shot gate for G availability (direct fill or states prGamma)
   RN sw_as_rn(int x, int y, bool inner) {
-    if (p2_sweep && l2r_mode != 0 && stem_ && !sw_filled) {
-      sw_filled = true;
-      // ntrUL must exist before sw_fill's cap_ga (same L trunc key as racc_finish_trunc).
-      if (g_ntr_K > 0 && !p2_g_suffix) {
-        const auto t0 = std::chrono::steady_clock::now();
-        ntr_init();
-        sw_ntr_init_sec +=
-            std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-      }
-      {
-        const auto t0 = std::chrono::steady_clock::now();
-        sw_fill(0, n);
-        sw_fill(1, std::min(pr_loop, cap));
-        sw_fill_sec +=
-            std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-      }
-      // Entries per G node after fill (slot 0 = full right gap).
-      for (const auto& kv : sw_ga[0]) {
-        const long long e = static_cast<long long>(kv.second.size());
-        ++sw_ga_nodes;
-        sw_ga_ent_sum += e;
-        if (e > sw_ga_ent_max) sw_ga_ent_max = e;
+    if (p2_sweep && l2r_mode != 0 && stem_ && !sw_g_ready) {
+      sw_g_ready = true;
+      if (g_sweep == G_SWEEP_DIRECT) {
+        sw_filled = true;
+        // ntrUL must exist before sw_fill's cap_ga (same L trunc key as racc_finish_trunc).
+        if (g_ntr_K > 0 && !p2_g_suffix) {
+          const auto t0 = std::chrono::steady_clock::now();
+          ntr_init();
+          sw_ntr_init_sec +=
+              std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        }
+        {
+          const auto t0 = std::chrono::steady_clock::now();
+          sw_fill(0, n);
+          sw_fill(1, std::min(pr_loop, cap));
+          sw_fill_sec +=
+              std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        }
+        // Entries per G node after fill (slot 0 = full right gap).
+        for (const auto& kv : sw_ga[0]) {
+          const long long e = static_cast<long long>(kv.second.size());
+          ++sw_ga_nodes;
+          sw_ga_ent_sum += e;
+          if (e > sw_ga_ent_max) sw_ga_ent_max = e;
+        }
+      } else {
+        // --g-sweep states: G already in stem_->prGamma from sw_hyper_push.
+        // Fill time is the G merge+cut copied onto this DP from the nested pass.
+        sw_filled = false;
+        sw_fill_sec = g_merge_sec + g_cut_sec;
+        if (stem_) {
+          for (const auto& kv : stem_->prGamma) {
+            const long long e = static_cast<long long>(kv.second.size());
+            ++sw_ga_nodes;
+            sw_ga_ent_sum += e;
+            if (e > sw_ga_ent_max) sw_ga_ent_max = e;
+          }
+        }
       }
     }
     const auto t_read0 = std::chrono::steady_clock::now();
@@ -15091,6 +15206,7 @@ class DP03 {
       const double dt = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
       if (sx_k_exact) sx_kx_sec += dt;
       else sx_k_sec += dt;
+      kl_in_read_sec += dt;
       return s;
     };
     if (arm < 0) return done(NEG_INF);
@@ -15102,6 +15218,32 @@ class DP03 {
       if (m >= 0 && m < 8) ++sx_m_h[m];
       if (list >= 0) ++sx_list_h[std::min(list, 64)];
     };
+    auto note_arm = [&]() {
+      if (arm < 0) return;
+      if (arm_seen.empty()) arm_seen.assign(static_cast<size_t>(std::max(prA, 1)), 0);
+      if (arm >= prA || arm_seen[static_cast<size_t>(arm)]) return;
+      arm_seen[static_cast<size_t>(arm)] = 1;
+      ++arm_read_n;
+      // |{f : V(c,f)[b] kept}| for arm (b,c)=(xs,xp)
+      int nf = 0;
+      if (stem_ && !stem_->prMu.empty()) {
+        const int b = prArmXs[arm], c = prArmXp[arm];
+        for (int f : pr_pair_list(true)[c]) {
+          auto it = stem_->prMu.find(key2(c, f));
+          if (it == stem_->prMu.end()) continue;
+          if (it->second.find(key2(b, 0)) != it->second.end()) ++nf;
+        }
+      }
+      arm_Vf_sum += nf;
+      if (nf > arm_Vf_max) arm_Vf_max = nf;
+      arm_Vf_samples.push_back(nf);
+      // |{q' : K_L(arm,q') nonzero}|
+      int n_kq = 0;
+      for (int qp = 0; qp + 1 <= n - 1; ++qp)
+        if (lK(arm, qp) > HALF_NEG) ++n_kq;
+      arm_Kq_sum += n_kq;
+      if (n_kq > arm_Kq_max) arm_Kq_max = n_kq;
+    };
     if (g_ntr_K > 0) {
       const int len = static_cast<int>(r.T[0].size());
       for (const auto& [qp, g] : r.T[0]) {
@@ -15109,6 +15251,7 @@ class DP03 {
         const double k = lK(arm, qp);
         if (k > HALF_NEG) s = log_add(s, g + k);
       }
+      note_arm();
       return done(s);
     }
     if (g_tr_K > 0) {
@@ -18769,7 +18912,7 @@ std::string normalize(const std::string& s) {
 void usage() {
   std::fprintf(stderr,
                "usage: dp03_cpp [--b1 N] [--b2 N] [--b4 N] [--bV N] [--bG N] "
-               "[--g-cut topq|collapse|entries] "
+               "[--g-cut topq|collapse|entries] [--g-sweep direct|states] "
                "[--loop-cap L] [--ml-lead-cap N|n] [--max-loop M] [--no-gu] [--rt RT] "
                "[--no-single-stems] [--wc-ends] "
                "[--score qz|prefix] [--no-pk] [--cutoff C] [--no-bpp] [--gap-beam group|step] "
@@ -20859,6 +21002,15 @@ int main(int argc, char** argv) {
         return 2;
       }
     }
+    else if (arg == "--g-sweep") {
+      const std::string s = next();
+      if (s == "direct") g_sweep = G_SWEEP_DIRECT;
+      else if (s == "states") g_sweep = G_SWEEP_STATES;
+      else {
+        std::fprintf(stderr, "--g-sweep must be direct or states\n");
+        return 2;
+      }
+    }
     else if (arg == "--grow-node-trunc-r") {
       g_ntr_KR = std::max(-1, std::atoi(next()));
     }
@@ -21952,6 +22104,17 @@ int main(int argc, char** argv) {
           const double cpu_p2_0 = ru_cpu();
           g_beam_stats.set_pass("pass2");
           np.build_principled(stem, pr_floor, stem_pr_nested, pr_check, pr_partner_floor);
+          if (g_sweep == G_SWEEP_STATES && nbeam) {
+            dp.g_pushes = nbeam->g_pushes;
+            dp.g_pre_n = nbeam->g_pre_n;
+            dp.g_pre_sum = nbeam->g_pre_sum;
+            dp.g_pre_max = nbeam->g_pre_max;
+            dp.g_post_n = nbeam->g_post_n;
+            dp.g_post_sum = nbeam->g_post_sum;
+            dp.g_post_max = nbeam->g_post_max;
+            dp.g_merge_sec = nbeam->g_merge_sec;
+            dp.g_cut_sec = nbeam->g_cut_sec;
+          }
           pass2_s += std::chrono::duration<double>(std::chrono::steady_clock::now() - t_p2).count();
           cpu_pass2 = ru_cpu() - cpu_p2_0;
           const double hwm_pass2 = hwm_mb();
@@ -22714,6 +22877,38 @@ int main(int argc, char** argv) {
                                           : 0.0,
                      mean_in, mean_out, work_per_out, dp.sw_ga_nodes, mean_ga, dp.sw_ga_ent_max,
                      dp.rn_keys, dp.pr_grow_sec);
+        auto meanll = [](long long s, long long n) {
+          return n > 0 ? static_cast<double>(s) / static_cast<double>(n) : 0.0;
+        };
+        std::fprintf(stderr,
+                     "[vg-fill] V pushes %lld pre_mean %.1f pre_max %lld post_mean %.1f post_max %lld "
+                     "merge_sec %.6f cut_sec %.6f | G pushes %lld pre_mean %.1f pre_max %lld "
+                     "post_mean %.1f post_max %lld merge_sec %.6f cut_sec %.6f\n",
+                     dp.v_pushes, meanll(dp.v_pre_sum, dp.v_pre_n), dp.v_pre_max,
+                     meanll(dp.v_post_sum, dp.v_post_n), dp.v_post_max, dp.v_merge_sec, dp.v_cut_sec,
+                     dp.g_pushes, meanll(dp.g_pre_sum, dp.g_pre_n), dp.g_pre_max,
+                     meanll(dp.g_post_sum, dp.g_post_n), dp.g_post_max, dp.g_merge_sec, dp.g_cut_sec);
+        auto yo_mean = [](long long s, long long n) {
+          return n > 0 ? static_cast<double>(s) / static_cast<double>(n) : 0.0;
+        };
+        std::fprintf(stderr,
+                     "[ml-yo] qm_ix %d S %d path %s pairs %lld yo_mean %.2f yo_max %lld | "
+                     "scan_path pairs %lld yo_mean %.2f yo_max %lld\n",
+                     dp.ml_yo_qm_ix ? 1 : 0, dp.ml_yo_S, dp.ml_yo_qm_ix ? "qm_ix" : "scan",
+                     dp.ml_yo_qm_n, yo_mean(dp.ml_yo_qm_sum, dp.ml_yo_qm_n), dp.ml_yo_qm_max,
+                     dp.ml_yo_sc_n, yo_mean(dp.ml_yo_sc_sum, dp.ml_yo_sc_n), dp.ml_yo_sc_max);
+        double vf_med = 0.0;
+        if (!dp.arm_Vf_samples.empty()) {
+          auto v = dp.arm_Vf_samples;
+          std::nth_element(v.begin(), v.begin() + static_cast<long>(v.size() / 2), v.end());
+          vf_med = v[v.size() / 2];
+        }
+        std::fprintf(stderr,
+                     "[kl-m] read_sec %.6f kl_in_read_sec %.6f arms %lld Vf_mean %.1f Vf_med %.1f "
+                     "Vf_max %lld Kq_mean %.1f Kq_max %lld\n",
+                     dp.sw_as_rn_sec, dp.kl_in_read_sec, dp.arm_read_n,
+                     meanll(dp.arm_Vf_sum, dp.arm_read_n), vf_med, dp.arm_Vf_max,
+                     meanll(dp.arm_Kq_sum, dp.arm_read_n), dp.arm_Kq_max);
       }
       if (g_mem_log) {
         static const char* pn[DP03::PT_N] = {"R", "Rs", "Rls", "Rlss", "Rrs", "U", "Us",
