@@ -118,3 +118,30 @@ involved); bG 256 keeps the seed and recovers.
   multiloop constants are the same values under rna1999/DP03 (a_p = alpha1 = 3.4, b_p = alpha2 =
   0.4, c_p = alpha3 = 0) and pair_bonus is 0, so they are not the cause; the remaining gap is
   not yet localized (dangles none can't test it: the identity fails for V and G states there too).
+
+## New default: G through multiloop states, bG 256 (Step 2)
+
+`--g-sweep states` is the default; `--preset accurate` writes `--bG 256` (was 32). Cut key unchanged
+(top-bG raw (p',q') by C_pre*G*S_pre). Paper preset: b1 200, b2 1000, b4 3000, bV 256, bG 256,
+pbeam (b2,b4,b4), linear pass-2 sweep, other paper flags as before. Binary `/tmp/new_exactness/bin/dp03_g256`.
+Accept rule: signed dlogZ vs exact >= old cut's - 0.01 (RNase P has no exact; compared on logZ).
+
+| seq | n | logZ | dlogZ vs exact | old cut (topq bG 32) | max dp | G fill s | scan CPU s | total CPU s | peak RSS MB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Ther | 349 | 327.397662 | -0.1456 | -0.1455 | 0.049 | 165 | 162 | 425 | 1829 |
+| Deha | 352 | 233.580012 | -1.5804 | -1.5817 | 0.627 | 144 | 173 | 407 | 1805 |
+| Pseu | 353 | 215.533277 | -0.2557 | -0.2534 | 0.100 | 151 | 273 | 513 | 1978 |
+| RP150 | 150 | 116.281324 | logZ -1.0e-5 vs old | 116.281334 | - | 10 | 23 | 43 | 453 |
+| RP486 | 486 | 440.339333 | logZ +0.3102 vs old | 440.029104 | - | 375 | 584 | 1145 | 3733 |
+
+All pass. Old cut for comparison (same table format; its G fill is lazy inside the scan):
+
+| seq | G fill s | scan CPU s | total CPU s | peak RSS MB |
+|---|---:|---:|---:|---:|
+| Ther | 1552 | 1741 | 1803 | 3212 |
+| Deha | 1203 | 1388 | 1453 | 3036 |
+| Pseu | 1137 | 1372 | 1436 | 2892 |
+| RP150 | 31 | 54 | 64 | 509 |
+| RP486 | 5062 | 5595 | 5722 | 7809 |
+
+New G fill runs in pass 2 (pass 2 CPU: Ther 214, Deha 187, Pseu 194, RP150 12, RP486 472 s).

@@ -60,7 +60,7 @@
 // --bG N: growth node trunc K (was --grow-node-trunc). Unset: 16 when grow-rec defaults apply.
 // --g-cut topq|collapse|entries: sw_fill node cap (default topq). topq = all p' for top-bG q';
 //   collapse = Ghat of size bG; entries = top-bG raw (p',q') by C_pre*G*S_pre.
-// --g-sweep direct|states (default direct): how G is built for growth reads.
+// --g-sweep direct|states (default states): how G is built for growth reads.
 //   direct = sw_fill (pair→pair via PrMbar); states = sw_hyper_push do_g on Qm/Qm2/pair (E1–E9),
 //   cut every state to bG entries by C_pre*G*S_pre; scan still applies Chat at read.
 // --qzbar-old: build StemEst Qzbar as the Oct-8/incperf path does — dense full nested Qz→prQz,
@@ -239,7 +239,7 @@ static FILE* g_mass_f = nullptr;
 enum { G_CUT_TOPQ = 0, G_CUT_COLLAPSE = 1, G_CUT_ENTRIES = 2 };
 static int g_cut = G_CUT_TOPQ;
 enum { G_SWEEP_DIRECT = 0, G_SWEEP_STATES = 1 };
-static int g_sweep = G_SWEEP_DIRECT;
+static int g_sweep = G_SWEEP_STATES;
 // --out-id: compare reconstructed outsides to pass-1 Qb_b. Stop term uses E.at,
 // the exterior-loop pair factor pass 1 adds into Qb_b (this check only; production seed is the same E.at).
 static bool g_out_id = false;
@@ -20605,7 +20605,7 @@ int main(int argc, char** argv) {
       args_s.push_back("--bV");
       args_s.push_back(acc ? "256" : "512");
       args_s.push_back("--bG");
-      args_s.push_back(acc ? "32" : "16");
+      args_s.push_back(acc ? "256" : "16");
       for (const char* x :
            {"--gap-beam", "step", "--loop-cap", "30", "--max-loop", "30", "--wc-ends", "--rt", "0.6163207755",
             "--cutoff", "1e-5", "--stem-est", "rank", "--stem-est-role", "all", "--stem-est-loop", "0",
