@@ -1,0 +1,232 @@
+\documentclass[11pt]{article}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[margin=1in]{geometry}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{amsmath,amssymb}
+\usepackage{enumitem}
+\hypersetup{colorlinks=true,linkcolor=black,urlcolor=black,citecolor=black}
+% Gaps we have not verified from a file, log, commit, or command output.
+\newcommand{\tofill}[1]{\textcolor{red}{\textbf{[tofill: #1]}}}
+\title{LinearKnot project notebook}
+\author{Milan Gautam and collaborators}
+\date{Version 1.2 \quad 2026-10-29}
+\begin{document}
+\maketitle
+
+\section*{Changelog}
+\begin{itemize}[leftmargin=*]
+  \item \textbf{1.2} (2026-10-29). Cursor Task~N: authored notebook on \texttt{fix-lambda}, filled gaps from repo and \texttt{/tmp/new\_exactness}, added F ladders and floor, wrote Q1 with evidence search outcome. Commit of this PDF follows the build.
+  \item \textbf{1.1}. Claude draft skeleton with red \texttt{\textbackslash tofill} markers (source was not on disk in the Cursor workspace; this file replaces it).
+\end{itemize}
+
+\section{Status}
+Branch \texttt{fix-lambda}. Sweep L-truncation fix is committed as \texttt{ca8cd5e} (q'-aware intermediate \texttt{cap\_ga}, \texttt{ntr\_init} before \texttt{sw\_fill}, default \texttt{--sweep on}). Exactness workstream: A--E and F beam ladders under \texttt{/tmp/new\_exactness}. Floor exact-K reruns for Deha / Shew.frig and Pseu at old flags~(a) were still running when this section was written; List exact-K finished.
+
+\section{Paper setting (current default path)}
+Unless an experiment says otherwise, the paper-facing linear pass-2 command is the expanded \texttt{--preset default} block in \texttt{cpp/dp03\_l2r\_merged.cpp} (energy model separate), plus the post-\texttt{ca8cd5e} defaults \texttt{--sweep on} and \texttt{--v-sweep on}. Material for the tmRNA campaigns: \texttt{--material rna1999 --dangles some} with \texttt{dp03/params/rna1999.dG}.
+
+\section{Beams and flags}
+Source for names, pruned tables, and unset defaults: file-header comments and CLI parsing in \texttt{cpp/dp03\_l2r\_merged.cpp} (read 2026-10-29 on \texttt{fix-lambda}).
+
+\begin{center}
+\begin{tabular}{@{}llp{0.42\textwidth}l@{}}
+\toprule
+Short & Flag & Tables / role & Unset default \\
+\midrule
+b1 & \texttt{--b1 N} (= \texttt{--nest-beam}) & Nested pre-pass and stem-estimate length beam & 200; \texttt{0} keeps every state \\
+b2 & \texttt{--b2 N} & Scan two-index columns Qb, Qm, Qm2, Qp, Qmp, and $Q^z$ / $Q^z_{\mathrm{pre}}$ via beam-table writes & 200 \\
+b4 & \texttt{--beam B} & Four-index / primary scan beam; also seeds pbeam when ratio unset & 1000 (\texttt{--preset default}), 3000 (\texttt{accurate}) \\
+bV & \texttt{--pr-v-cap N} & Cap on pass-2 $V$ key lists (xs-keyed) & 0 (none) in raw CLI; preset writes 512 \\
+bG & \texttt{--grow-node-trunc K} & Top-$K$ on growth node / root / key $L$ (and $R$ unless KR overrides) & 16 under \texttt{--pk-l2r} grow defaults \\
+pbeam & \texttt{--l2r-pbeam} $b_1,b_2,b_3$ & Pass-2 $P1,P2,P3$ beams & preset default \texttt{1000,2000,2000}; accurate \texttt{3000,6000,6000}; else P1 follows b2 \\
+& \texttt{--grow-node-trunc-r KR} & $R$-side $K$ (\texttt{-1}: dense, no $R$ trunc) & \texttt{-1} under grow defaults \\
+& \texttt{--ml-lead-cap N} & Multiloop leading-run cap & \tofill{unset numeric default in CLI when flag absent} \\
+& \texttt{--sweep on|off} & Pass-2 $\Lambda$ via \texttt{sw\_as\_rn}/\texttt{sw\_fill} vs lazy \texttt{rec\_node} & on after \texttt{ca8cd5e} \\
+& \texttt{--v-sweep on|off} & $V$ sweep path & on after \texttt{ca8cd5e} \\
+& \texttt{--k-exact} & Exact $K$ (sets \texttt{sx\_k\_exact}) & off \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Here $Z$ is the partition function and $\log Z$ is its natural log as printed by the binary. $|d\log Z|$ means absolute deviation from a stated reference $\log Z$.
+
+\section{Binaries}
+\begin{itemize}[leftmargin=*]
+  \item \textbf{NEW (fixed sweep).} \texttt{/tmp/new\_exactness/bin/dp03\_fixlam\_sweep}, built 2026-10-29 17:41 from \texttt{cpp/dp03\_l2r\_merged.cpp} at \texttt{ca8cd5e} (NFS \texttt{cpp/dp03\_cpp\_l2r\_merged\_fixlam} was root-owned and not overwritten).
+  \item \textbf{OLD (hard14).} \texttt{stemest/l2r\_incperf/hard14/bin/dp03\_cpp\_l2r\_incperf\_st}, mtime 2026-10-08 09:26. Commit hash for that binary: \tofill{no COMMIT/README next to the binary; git history does not name the hard14 build commit}.
+\end{itemize}
+
+\section{Sixteen-sequence exactness set}
+Lengths and NUPACK $\log Z$ references as stored in \texttt{/tmp/new\_exactness/G4/dumps/A/rmsd\_accurate\_sweep\_off.tsv} (and \texttt{F/refs.tsv} for the F subset).
+
+\begin{center}
+\begin{tabular}{@{}clc@{}}
+\toprule
+id & $n$ & ref $\log Z$ \\
+\midrule
+RNaseP\_M.maripaludus & 233 & 123.70113227733664 \\
+tmRNA\_List.seel.\_AF440350\_1-321 & 321 & 167.85922194326875 \\
+tmRNA\_Neph.oliv.\_AF137379-2\_1-327 & 327 & 173.75579255587826 \\
+tmRNA\_Guil.thet.\_TRW-55529\_1-330 & 330 & 131.15024937540662 \\
+tmRNA\_envi.sequ.\_TRW-32045-2\_1-345 & 345 & 173.78533977734457 \\
+tmRNA\_Stre.pyog.\_AE010048\_1-348 & 348 & 182.04454642042813 \\
+tmRNA\_Ther.ther.\_TRW-300852\_1-349 & 349 & 327.54328498495346 \\
+tmRNA\_Stre.ther.\_CP000024\_1-350 & 350 & 182.67065332315087 \\
+tmRNA\_Deha.ethe.\_CP000027\_1-352 & 352 & 235.1604179763773 \\
+tmRNA\_Pseu.aeru.\_AE004091\_1-353 & 353 & 215.78897238700173 \\
+tmRNA\_Baci.cere.\_AE017194\_1-355 & 355 & 193.30551533091716 \\
+tmRNA\_Shew.spec.\_CP000446\_1-355 & 355 & 213.5884771794067 \\
+tmRNA\_envi.sequ.\_TRW-32045-1\_1-355 & 355 & 179.2041590713455 \\
+tmRNA\_Shew.frig.\_CP000447\_1-356 & 356 & 216.19289033333584 \\
+tmRNA\_Camp.jeju.\_AX048472\_1-359 & 359 & 193.00731545443256 \\
+tmRNA\_Lept.spec.\_TRW-261385\_1-359 & 359 & 245.7437570575795 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{DP03 / NUPACK reference $\log Z$}
+The tmRNA $|d\log Z|$ numbers in G4/E/F compare against the \texttt{ref\_logZ} column above (treated as NUPACK in experiment reports). Exact producer of those reference values: \tofill{which NUPACK/DP03 binary and full flag line wrote ref\_logZ}. Whether that reference used multiloop leading-run cap 30: \tofill{not stated next to the TSV}. The linear pipeline does expose \texttt{--ml-lead-cap}; paper preset expansion in source does not insert it, while linp2 default experiments pass \texttt{--ml-lead-cap 30}.
+
+\section{DP03 timing / $n^{5.8}$ fit}
+We found timing runs under \texttt{scaling\_step/} (compact binary \texttt{./dp03\_compact --beam 100 --gap-beam step --cutoff 1e-6}):
+
+\begin{center}
+\begin{tabular}{@{}rrr@{}}
+\toprule
+$n$ & wall (s) & peak RSS (KB) \\
+\midrule
+200 & 1.64 & 31180 \\
+400 & 8.97 & 72660 \\
+800 & 57.92 & 236876 \\
+1600 & 347.18 & 705200 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Whether these are the runs used for the published $n^{5.8}$ fit: \tofill{no note in scaling\_step naming the 5.8 exponent or listing the fit}. Separate lp2 timings exist in the same directory for \texttt{../cpp/dp03\_cpp} at the same beam/cutoff.
+
+\section{Experiment log}
+
+\subsection{G\_hex}
+\begin{itemize}[leftmargin=*]
+  \item Question: P3 $t{=}35$ $H_{\mathrm{ex}}$ c1-term diagnosis on Ther $n{=}63$.
+  \item Out: \texttt{/tmp/new\_exactness/G\_hex}. REPORT mtime 2026-10-29 11:17.
+  \item Flags: E\_ther63 OLD hard14 accurate + \texttt{--no-bpp}; NEW + \texttt{--b1 0 --param-file}. Diag copies only.
+  \item Commit/branch: \tofill{not recorded in G\_hex/REPORT.md}.
+\end{itemize}
+
+\subsection{G2}
+\begin{itemize}[leftmargin=*]
+  \item Question: Lambda root cache / exactness on Ther.
+  \item Out: \texttt{/tmp/new\_exactness/G2}. REPORT mtime 2026-10-29 13:51.
+  \item Conclusion (from REPORT): cache not the cause.
+\end{itemize}
+
+\subsection{G3}
+\begin{itemize}[leftmargin=*]
+  \item Question: growth-path / $\Lambda_L$ loss after G2.
+  \item Out: \texttt{/tmp/new\_exactness/G3}. REPORT mtime 2026-10-29 15:26.
+  \item Conclusion: NEW loses $q'$ in $\Lambda_L$ / lower $g$ on shared $q'$ (max $|\Delta g|{\sim}0.52$).
+\end{itemize}
+
+\subsection{G4}
+\begin{itemize}[leftmargin=*]
+  \item Question: sweep validation, truncation parity, pass-2 cost (Parts A--D planned).
+  \item Out: \texttt{/tmp/new\_exactness/G4}. REPORT mtime 2026-10-29 17:26.
+  \item Branch note in REPORT: \texttt{fix-lambda} = \texttt{fix-qzbar} (\texttt{e0e4c31}) + sweep-default-off (\texttt{e53f948}); later \texttt{ca8cd5e} fixed trunc and restored default on.
+  \item Part A (sweep off vs old on) mean $|d\log Z|$: 0.879 (off) vs 1.442 (on) on the 16-seq set.
+\end{itemize}
+
+\subsection{E (flag bracketing)}
+\begin{itemize}[leftmargin=*]
+  \item Out: \texttt{/tmp/new\_exactness/E}, summary \texttt{REPORT\_sweep\_on.md} (2026-10-29 18:08).
+  \item Base (a): E\_ther63 flags with \texttt{--sweep on} (fixed binary), \texttt{--no-bpp}.
+  \item Ther $|d\log Z|$ at (a): 0.0649; Deha 1.626. Flags that move Ther by ${>}0.05$: \texttt{--beam}${\to}1000$ (+5.95), \texttt{--pr-v-cap}${\to}128$ (+5.64), \texttt{--b1}${\to}200$ (+0.080).
+  \item OLD hard14 $|d\log Z|$: Deha 1.614, envi-1 1.063, Shew.frig 0.795, Pseu.aeru 0.248.
+\end{itemize}
+
+\subsection{F (beam ladders and floor)}
+\begin{itemize}[leftmargin=*]
+  \item Out: \texttt{/tmp/new\_exactness/F}. Binary \texttt{dp03\_fixlam\_sweep} @ \texttt{ca8cd5e}. Base = (a) with \texttt{--b1 200}, \texttt{--sweep on}, \texttt{--no-bpp}.
+  \item Concurrency: ladder 20, floor 6 (cgroup memory max 300\,Gi, 96 CPUs).
+\end{itemize}
+
+\paragraph{F.1 b4 ladder at bV=512.}
+Values $|d\log Z|$ / wall(s) / peak RSS(KB) from \texttt{F/scripts/summarize\_F.py} / dumps.
+
+{\footnotesize
+\begin{center}
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+seq & b4=1000 & b4=2000 & b4=3000 & b4=6000 \\
+\midrule
+Ther.ther & 6.458/751/2350252 & 0.215/824/2575368 & 0.145/841/2822780 & 0.043/871/3446812 \\
+Deha.ethe & 2.369/668/2242196 & 2.117/688/2475568 & 1.592/736/2727608 & 1.451/764/3355284 \\
+envi-1 & 2.201/725/2415344 & 1.769/768/2640788 & 1.440/797/2890072 & 0.415/865/3515688 \\
+Shew.frig & 0.968/744/2329572 & 0.852/788/2566304 & 0.826/807/2820044 & 0.798/845/3449424 \\
+Shew.spec & 1.192/729/2369396 & 0.738/783/2591360 & 0.483/788/2825448 & 0.354/873/3484824 \\
+Pseu.aeru & 0.697/648/2171584 & 0.353/690/2396076 & 0.253/694/2627252 & 0.139/785/3285780 \\
+Camp.jeju & 0.039/757/2528488 & 0.023/829/2765136 & 0.014/807/3006484 & 0.008/891/3667624 \\
+List.seel & 0.864/500/1844764 & 0.862/533/2057256 & 0.861/551/2269284 & 0.852/629/2858212 \\
+\bottomrule
+\end{tabular}
+\end{center}
+}
+
+\paragraph{F.2 bV ladder at b4=3000.}
+$|d\log Z|$ identical for bV $\in\{128,256,512,1024\}$ on every sequence (dumps). Example walls at bV=512 match the b4=3000 column above.
+
+\paragraph{F.3 Floor.}
+Flags: b4=10000, bV=2048, pbeam=\texttt{6000,12000,12000}, bG=64, b1=0, \texttt{--sweep on}.
+
+\begin{center}
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+seq & $\log Z$ & $|d\log Z|$ & wall (s) & RSS (KB) \\
+\midrule
+Ther.ther & 327.53994 & 0.00334 & 2220.6 & 6945020 \\
+Deha.ethe & 234.59490 & 0.56552 & 1826.0 & 6646160 \\
+envi-1 & 178.97894 & 0.22522 & 2117.9 & 6902304 \\
+Shew.frig & 215.41589 & 0.77700 & 2012.0 & 6756528 \\
+Shew.spec & 213.31974 & 0.26874 & 2123.2 & 6826640 \\
+Pseu.aeru & 215.72632 & 0.06265 & 1981.9 & 6460036 \\
+Camp.jeju & 193.00213 & 0.00518 & 2243.4 & 7262772 \\
+List.seel & 167.01972 & 0.83950 & 1421.0 & 5427596 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Floor $|d\log Z|{>}0.3$: Deha, Shew.frig, List. Exact-K option \texttt{--k-exact} exists in CLI. List+\texttt{--k-exact}: $|d\log Z|{=}0.83845$ (wall 1502\,s, RSS 5608768\,KB), $\Delta$ vs floor $-0.00106$. Deha/Shew.frig exact-K and Pseu at pure (a) (\texttt{--b1 0}): \tofill{still running or not yet in dumps when notebook built; re-read F/dumps}.
+
+\section{ArchiveII RMSD run arch17\_vg/v256\_g32\_A}
+\tofill{path and whether that run used sweep before ca8cd5e; no arch17\_vg/v256\_g32\_A directory found under the repo or /tmp in Task~N search}.
+
+\section{Open questions}
+\subsection{Q1. HIV-1 NL4-3 $\log Z$ drop when raising b4}
+\paragraph{Stated measurements (user-provided facts for this notebook).}
+HIV-1 NL4-3 ($n{=}9173$), linear pass~2, \texttt{--no-bpp}, b1=200, b2=200, bV=128, bG=32, \texttt{--l2r-pbeam 200,2*b4,2*b4}, \texttt{--loop-cap 30}, \texttt{--max-loop 30}, \texttt{--ml-lead-cap 30}, \texttt{--sweep on}, \texttt{--v-sweep on}.
+\begin{itemize}[leftmargin=*]
+  \item b4=1000: $\log Z{=}4341.103359$, wall 2:42:44, 54.0\,GB.
+  \item b4=3000: $\log Z{=}4329.288287$, wall 4:30:30, 76.1\,GB.
+\end{itemize}
+The drop is non-monotone in beam width (larger b4, smaller $\log Z$).
+
+\paragraph{Evidence search (Task~N, read-only).}
+We searched git messages/diffs on \texttt{fix-lambda} and \texttt{--all} for HIV, NL4-3, monoton, b2, nested beam, logZ drop; \texttt{/tmp/new\_exactness}; \texttt{saureus\_b4/report.txt} (S.~aureus b4 series, not NL4-3); \texttt{BEAM\_BY\_ARITY.md}; agent transcripts under \texttt{.cursor/projects/.../agent-transcripts}. No file, log, or commit in that search establishes that the NL4-3 drop was traced to small b2=200. Related but distinct: \texttt{saureus\_b4/report.txt} shows non-monotone $\log Z$ vs b4 on another long sequence (b4 1000 ${\to}$ 1801.85, b4 2000 ${\to}$ 1799.98, b4 3000 ${\to}$ 1800.80) without a b2 diagnosis. Binary path, commit, and build time for the two HIV NL4-3 runs: \tofill{not found in searched trees}. Relative to \texttt{ca8cd5e}: \tofill{unknown without the binary stamp}.
+
+\paragraph{Q1 conclusion.}
+We do not have on-disk evidence that the NL4-3 b4=1000${\to}$3000 $\log Z$ drop was established as a b2=200 effect. That explanation remains unverified in this notebook.
+
+\section{Next steps}
+\begin{enumerate}[leftmargin=*]
+  \item Finish F exact-K (Deha, Shew.frig) and Pseu~(a); fold numbers into this notebook.
+  \item Choose E/F settings for campaigns D/C (deferred until E/F settings chosen).
+  \item Revisit Q1 only with a logged b2 ablation on NL4-3, or locate the original HIV run directory.
+  \item After each finished slice of Task~D, append an experiment entry under the notebook rule.
+\end{enumerate}
+
+\end{document}

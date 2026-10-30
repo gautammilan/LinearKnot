@@ -1,16 +1,14 @@
-# Build the LinearKnot project notebook PDF (pdflatex x2 for refs/TOC).
-TEX = linearknot_notebook.tex
-PDF = linearknot_notebook.pdf
-LATEX = pdflatex
-LATEXFLAGS = -interaction=nonstopmode -halt-on-error
+# Host texlive-cm TFMs may be missing; set TEXMFHOME to a tree with
+# fonts/tfm/public/cm/cmr10.tfm (e.g. $(HOME)/texmf after seeding CM TFMs).
+TEXMFHOME ?= $(HOME)/texmf
+export TEXMFHOME
 
 .PHONY: all clean
+all: linearknot_notebook.pdf
 
-all: $(PDF)
-
-$(PDF): $(TEX)
-	$(LATEX) $(LATEXFLAGS) $(TEX)
-	$(LATEX) $(LATEXFLAGS) $(TEX)
+linearknot_notebook.pdf: linearknot_notebook.tex
+	pdflatex -interaction=nonstopmode $<
+	pdflatex -interaction=nonstopmode $<
 
 clean:
-	rm -f *.aux *.log *.out *.toc *.pdf
+	rm -f *.aux *.log *.out *.toc missfont.log
