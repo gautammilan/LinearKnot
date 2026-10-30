@@ -3870,6 +3870,10 @@ class DP03 {
             gs_rent = 0, gs_U = 0, gc_n = 0, gc_vL = 0, gc_vR = 0, gc_sel_gt = 0;
   double gs_share[2] = {}, pr_grow_sec = 0.0, pr_sel_sec = 0.0, gc_maxL = NEG_INF,
          gc_maxR = NEG_INF;
+  // g-read profile: one-time fill vs per-root sw_as_rn aggregation.
+  double sw_ntr_init_sec = 0.0, sw_fill_sec = 0.0, sw_as_rn_sec = 0.0;
+  long long sw_as_rn_calls = 0, sw_as_rn_ent_in = 0, sw_as_rn_ent_out = 0;
+  long long sw_ga_nodes = 0, sw_ga_ent_sum = 0, sw_ga_ent_max = 0;
   // steps of the built nodes by kind: [0] growth nodes + roots, [1] future stems;
   // [.][0] interior, [.][1] multiloop.  Partner terms: wall time of the outermost T / K /
   // Stop build.  stop_j: the step at which a CPU-limit stop was taken (-1: none).
@@ -10548,10 +10552,28 @@ class DP03 {
     if (p2_sweep && l2r_mode != 0 && stem_ && !sw_filled) {
       sw_filled = true;
       // ntrUL must exist before sw_fill's cap_ga (same L trunc key as racc_finish_trunc).
-      if (g_ntr_K > 0 && !p2_g_suffix) ntr_init();
-      sw_fill(0, n);
-      sw_fill(1, std::min(pr_loop, cap));
+      if (g_ntr_K > 0 && !p2_g_suffix) {
+        const auto t0 = std::chrono::steady_clock::now();
+        ntr_init();
+        sw_ntr_init_sec +=
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+      }
+      {
+        const auto t0 = std::chrono::steady_clock::now();
+        sw_fill(0, n);
+        sw_fill(1, std::min(pr_loop, cap));
+        sw_fill_sec +=
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+      }
+      // Entries per G node after fill (slot 0 = full right gap).
+      for (const auto& kv : sw_ga[0]) {
+        const long long e = static_cast<long long>(kv.second.size());
+        ++sw_ga_nodes;
+        sw_ga_ent_sum += e;
+        if (e > sw_ga_ent_max) sw_ga_ent_max = e;
+      }
     }
+    const auto t_read0 = std::chrono::steady_clock::now();
     RN r;
     std::unordered_map<int, double> byq;
     const std::unordered_map<uint64_t, double>* src = nullptr;
@@ -10567,6 +10589,7 @@ class DP03 {
       if (it != sw_ga[inner ? 1 : 0].end()) src = &it->second;
     }
     if (src) {
+      sw_as_rn_ent_in += static_cast<long long>(src->size());
       for (const auto& [k, w] : *src) {
         const int q = k_lo(k);
         const double g = w + prefix_log(k_hi(k));
@@ -10623,6 +10646,10 @@ class DP03 {
       for (const auto& [q, g] : byq)
         if (g > HALF_NEG) a.v[static_cast<size_t>(q - lo)] = std::exp(g - mx);
     }
+    ++sw_as_rn_calls;
+    sw_as_rn_ent_out += static_cast<long long>(r.T[0].size());
+    sw_as_rn_sec +=
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - t_read0).count();
     return r;
   }
   const RN& rec_root(int x, int y, bool inner) {
@@ -22600,6 +22627,32 @@ int main(int argc, char** argv) {
                    dp.pr_static_sec, dp.l2r_arm_ents(), g_ntr_K, dp.ntr_nodes, dp.ntr_in[0], dp.ntr_kept[0],
                    dp.ntr_in[1], dp.ntr_kept[1], g_ntr_KR > 0 ? g_ntr_KR : g_ntr_K, dp.ntr_rmiss,
                    static_cast<int>(g_mtrim));
+      if (dp.sw_as_rn_calls > 0 || dp.sw_fill_sec > 0.0) {
+        const double mean_in =
+            dp.sw_as_rn_calls > 0
+                ? static_cast<double>(dp.sw_as_rn_ent_in) / static_cast<double>(dp.sw_as_rn_calls)
+                : 0.0;
+        const double mean_out =
+            dp.sw_as_rn_calls > 0
+                ? static_cast<double>(dp.sw_as_rn_ent_out) / static_cast<double>(dp.sw_as_rn_calls)
+                : 0.0;
+        const double mean_ga =
+            dp.sw_ga_nodes > 0 ? static_cast<double>(dp.sw_ga_ent_sum) / static_cast<double>(dp.sw_ga_nodes)
+                              : 0.0;
+        const double work_per_out =
+            mean_out > 0.0 ? mean_in / mean_out : 0.0;
+        std::fprintf(stderr,
+                     "[g-read] n %d bG %d ntr_init_sec %.6f sw_fill_sec %.6f sw_as_rn_calls %lld "
+                     "sw_as_rn_sec %.6f ms_per_read %.4f ent_in_mean %.1f ent_out_mean %.1f "
+                     "work_per_out %.1f ga_nodes %lld ga_ent_mean %.1f ga_ent_max %lld "
+                     "rn_keys %lld grow_sec %.6f\n",
+                     static_cast<int>(seq.size()), g_ntr_K, dp.sw_ntr_init_sec, dp.sw_fill_sec,
+                     dp.sw_as_rn_calls, dp.sw_as_rn_sec,
+                     dp.sw_as_rn_calls > 0 ? 1e3 * dp.sw_as_rn_sec / static_cast<double>(dp.sw_as_rn_calls)
+                                          : 0.0,
+                     mean_in, mean_out, work_per_out, dp.sw_ga_nodes, mean_ga, dp.sw_ga_ent_max,
+                     dp.rn_keys, dp.pr_grow_sec);
+      }
       if (g_mem_log) {
         static const char* pn[DP03::PT_N] = {"R", "Rs", "Rls", "Rlss", "Rrs", "U", "Us",
                                              "Uls", "Ulss", "Urs", "S", "P1", "P2", "P3"};
