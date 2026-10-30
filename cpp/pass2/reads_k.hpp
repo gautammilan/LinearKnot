@@ -1,5 +1,6 @@
-// Pass-2 reads for pass 3: W, T, K_L (pr_K), context, S_L / S_R (pr_SLR), U_L / U_R / U,
-// growth selection (pr_gselect by iota = w (U_L + U_R)), growth build, roots and keys.
+// Principled-B reads (lazy path): W, T, K_L (pr_K), context, S_L / S_R (pr_SLR), U_L / U_R / U,
+// growth selection (pr_gselect by iota = w (U_L + U_R)), growth build, roots and keys. The paper
+// preset runs only pr_ub_init and pr_ls_closings here; its K_L read is lK in pass3/scan_scores.hpp.
 //
 // Fragment of the unity build: #included by cpp/main.cpp at this point of the original
 // file (inside namespace / class DP03 / main() as main.cpp shows); not a standalone header.
