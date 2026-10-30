@@ -243,6 +243,11 @@ static int g_sweep = G_SWEEP_DIRECT;
 // --out-id: compare reconstructed outsides to pass-1 Qb_b. Stop term uses E.at,
 // the exterior-loop pair factor pass 1 adds into Qb_b (this check only; production seed is the same E.at).
 static bool g_out_id = false;
+// --g-cut-at all|pair (--g-sweep states): cut G at every state, or at pair states only.
+static bool g_cut_pair_only = false;
+// --g-trace P,Q[,X,Y] (--g-sweep states, 0-based): log each state whose G cut drops entry
+// (P,Q); with X,Y only states (i,j) with P <= i <= X, Y <= j <= Q (between the two pairs).
+static int g_trace_p = -1, g_trace_q = -1, g_trace_x = -1, g_trace_y = -1;
 // --grow-node-trunc-r KR: K of the R side (0: K; -1: R not truncated, stored dense in R[0], the
 // layers summed)
 static int g_ntr_KR = 0;
@@ -2849,6 +2854,10 @@ class DP03 {
       scale_into(d, s, a);
       ++pushes;
     };
+    // State being capped: kind 0 pair, 1 Qm, 2 Qm2; (cap_i, cap_j) its span.
+    int cap_kind = 0, cap_i = -1, cap_j = -1;
+    const uint64_t trace_k = g_trace_p >= 0 ? key2(g_trace_p, g_trace_q) : ~0ULL;
+    long long tr_seen[3] = {}, tr_drop[3] = {}, tr_lines = 0;
     auto cap_ga = [&](Ga& m) {
       const long long pre = static_cast<long long>(m.size());
       g_pre.add(m.size());
@@ -2856,8 +2865,9 @@ class DP03 {
       g_pre_sum += pre;
       if (pre > g_pre_max) g_pre_max = pre;
       const auto tc0 = std::chrono::steady_clock::now();
+      const bool cut_here = !(g_cut_pair_only && cap_kind != 0);
       // --g-sweep states: always entries cut by C_pre * G * S_pre (bG = Kg).
-      if (Kg > 0 && static_cast<int>(m.size()) > Kg) {
+      if (cut_here && Kg > 0 && static_cast<int>(m.size()) > Kg) {
         struct E {
           uint64_t k;
           double w, s;
@@ -2875,6 +2885,35 @@ class DP03 {
           s += sb;
           v.push_back({k, w, s});
         }
+        const bool on_path = g_trace_x < 0 || (cap_i >= g_trace_p && cap_i <= g_trace_x &&
+                                               cap_j >= g_trace_y && cap_j <= g_trace_q);
+        if (trace_k != ~0ULL && on_path) {
+          const E* te = nullptr;
+          for (const E& e : v)
+            if (e.k == trace_k) te = &e;
+          if (te) {
+            ++tr_seen[cap_kind];
+            long long rank = 0;
+            for (const E& e : v)
+              if (e.s > te->s || (e.s == te->s && e.k < te->k)) ++rank;
+            if (rank >= Kg) {
+              ++tr_drop[cap_kind];
+              if (tr_lines++ < 40) {
+                const double kth = [&]() {
+                  std::vector<double> ss;
+                  ss.reserve(v.size());
+                  for (const E& e : v) ss.push_back(e.s);
+                  std::nth_element(ss.begin(), ss.begin() + (Kg - 1), ss.end(), std::greater<double>());
+                  return ss[static_cast<size_t>(Kg - 1)];
+                }();
+                std::fprintf(stderr,
+                             "[g-trace] drop %s %d.%d rank %lld of %zu (bG %d) score %.6f kth %.6f\n",
+                             cap_kind == 0 ? "pair" : cap_kind == 1 ? "Qm" : "Qm2", cap_i, cap_j,
+                             rank, v.size(), Kg, te->s, kth);
+              }
+            }
+          }
+        }
         if (static_cast<int>(v.size()) > Kg) {
           std::nth_element(v.begin(), v.begin() + Kg, v.end(), [](const E& a, const E& b) {
             if (a.s != b.s) return a.s > b.s;
@@ -2884,6 +2923,10 @@ class DP03 {
         }
         m.clear();
         for (const E& e : v) m.emplace(e.k, e.w);
+      } else if (trace_k != ~0ULL && m.count(trace_k) &&
+                 (g_trace_x < 0 || (cap_i >= g_trace_p && cap_i <= g_trace_x && cap_j >= g_trace_y &&
+                                    cap_j <= g_trace_q))) {
+        ++tr_seen[cap_kind];
       }
       g_cut_sec += std::chrono::duration<double>(std::chrono::steady_clock::now() - tc0).count();
       const long long post = static_cast<long long>(m.size());
@@ -3111,8 +3154,18 @@ class DP03 {
           Cb[static_cast<size_t>(i - 1)] = log_add(Cb[static_cast<size_t>(i - 1)], (cb + qb) + at);
         (void)left;
       }
-      for (auto& kv : qm[static_cast<size_t>(j)]) cap_m(kv.second);
-      for (auto& kv : qm2[static_cast<size_t>(j)]) cap_m(kv.second);
+      cap_j = j;
+      cap_kind = 1;
+      for (auto& kv : qm[static_cast<size_t>(j)]) {
+        cap_i = kv.first;
+        cap_m(kv.second);
+      }
+      cap_kind = 2;
+      for (auto& kv : qm2[static_cast<size_t>(j)]) {
+        cap_i = kv.first;
+        cap_m(kv.second);
+      }
+      cap_kind = 0;
       for (size_t r = 0; r < Qb_at[j].slots(); ++r) {
         const int d = Qb_at[j].keys[r];
         if (d < 0 || !E.end_ok(d, j)) continue;
@@ -3184,6 +3237,9 @@ class DP03 {
             if (sb > HALF_NEG) add1(m.v, key2(i, 0), e_out + sb);
           }
         }
+        cap_kind = 0;
+        cap_i = i;
+        cap_j = j;
         cap_m(m);
         if (l2r_mode != 0 && E.end_ok(i, j) && i + 1 <= j - 1 && Qm2_at[j - 1].has(i + 1)) {
           note_push(9, kept_at(Qb_at[j], i) && kept_at(Qm2_at[j - 1], i + 1));
@@ -3344,6 +3400,31 @@ class DP03 {
     if (g_out_id && do_g) out_id_one("G-states", true, st.prGamma);
     st.pr_mbar_max = std::max(st.pr_mbar_max, qm_max);
     st.pr_sw_sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    if (do_g && trace_k != ~0ULL) {
+      int fin_n = 0;
+      double fin_w = NEG_INF;
+      for (const auto& [pk, g] : st.prGamma) {
+        auto it = g.find(trace_k);
+        if (it == g.end()) continue;
+        ++fin_n;
+        fin_w = log_add(fin_w, it->second);
+      }
+      std::fprintf(stderr,
+                   "[g-trace] key %d.%d seen pair %lld Qm %lld Qm2 %lld dropped pair %lld Qm %lld "
+                   "Qm2 %lld final_pairs_holding %d\n",
+                   g_trace_p, g_trace_q, tr_seen[0], tr_seen[1], tr_seen[2], tr_drop[0], tr_drop[1],
+                   tr_drop[2], fin_n);
+      (void)fin_w;
+      if (g_trace_x >= 0) {
+        auto it = st.prGamma.find(key2(g_trace_x, g_trace_y));
+        const bool has_root = it != st.prGamma.end();
+        const bool has_key = has_root && it->second.count(trace_k);
+        std::fprintf(stderr, "[g-trace] root %d.%d in_G %d entries %zu holds %d.%d %d w %.6f\n",
+                     g_trace_x, g_trace_y, has_root ? 1 : 0, has_root ? it->second.size() : 0,
+                     g_trace_p, g_trace_q, has_key ? 1 : 0,
+                     has_key ? it->second.at(trace_k) : NEG_INF);
+      }
+    }
     std::fprintf(stderr,
                  "[sweep-kept] l2r_mode %d allow_pk %d maps qm %lld bad %lld qm2 %lld bad %lld "
                  "pair %lld bad %lld\n",
@@ -10871,6 +10952,172 @@ class DP03 {
           std::fprintf(stderr,
                        "[g-entry] both %lld only_states %lld only_direct %lld max_rel %.3e\n", both,
                        only_s, only_d, max_e);
+          {
+            // Mismatched entries closest to their outer pair: (x - p') + (q' - y) smallest.
+            struct Mm {
+              int d, x, y, p, q;
+              double s, dd;
+            };
+            std::vector<Mm> mm;
+            const double mm_tol = std::getenv("GMM_TOL") ? std::atof(std::getenv("GMM_TOL")) : 1e-9;
+            for (const auto& [pk, sg] : stem_->prGamma) {
+              auto it = sw_ga[0].find(pk);
+              if (it == sw_ga[0].end()) continue;
+              const int x = k_hi(pk), y = k_lo(pk);
+              for (const auto& [k, w] : sg) {
+                auto jt = it->second.find(k);
+                const double dv = jt == it->second.end() ? NEG_INF : jt->second;
+                if (rel(w, dv) <= mm_tol) continue;
+                const int p = k_hi(k), q = k_lo(k);
+                mm.push_back({(x - p) + (q - y), x, y, p, q, w, dv});
+              }
+            }
+            std::sort(mm.begin(), mm.end(), [](const Mm& a, const Mm& b) {
+              if (a.d != b.d) return a.d < b.d;
+              return a.s - a.dd > b.s - b.dd;
+            });
+            std::vector<long long> by_d(8, 0);
+            for (const Mm& m : mm) ++by_d[static_cast<size_t>(std::min(m.d, 7))];
+            std::fprintf(stderr, "[g-mm] mismatched %zu by outer distance 0..6,7+:", mm.size());
+            for (long long c : by_d) std::fprintf(stderr, " %lld", c);
+            std::fprintf(stderr, "\n");
+            for (size_t t = 0; t < mm.size() && t < 12; ++t)
+              std::fprintf(stderr,
+                           "[g-mm] pair %d.%d entry %d.%d dist %d states %.6f direct %.6f end_ok %d/%d\n",
+                           mm[t].x, mm[t].y, mm[t].p, mm[t].q, mm[t].d, mm[t].s, mm[t].dd,
+                           E.end_ok(mm[t].x, mm[t].y) ? 1 : 0, E.end_ok(mm[t].p, mm[t].q) ? 1 : 0);
+          }
+          // Pairs direct holds that states does not: why.
+          long long dp_n = 0, dp_notend = 0, dp_noref = 0, dp_sumneg = 0, dp_instates = 0;
+          for (const auto& [pk, dg] : sw_ga[0]) {
+            if (dg.empty()) continue;
+            const int i = k_hi(pk), j = k_lo(pk);
+            const double ref = stem_->prQb_b[static_cast<size_t>(i) * n + j];
+            ++dp_n;
+            if (stem_->prGamma.count(pk)) {
+              ++dp_instates;
+              continue;
+            }
+            if (!E.end_ok(i, j)) ++dp_notend;
+            else if (ref < HALF_NEG) ++dp_noref;
+            else if (sum_g(&dg) < HALF_NEG) ++dp_sumneg;
+          }
+          std::fprintf(stderr,
+                       "[d-pairs] direct %lld in_states %lld extra_not_end_ok %lld extra_no_Qb_b %lld "
+                       "extra_other %lld\n",
+                       dp_n, dp_instates, dp_notend, dp_noref, dp_n - dp_instates - dp_notend - dp_noref);
+          (void)dp_sumneg;
+          // Entries states holds that direct does not: by the seed pair (p',q').
+          long long so_seed_not_direct = 0, so_seed_not_end = 0, so_outer_missing = 0, so_other = 0;
+          for (const auto& [pk, sg] : stem_->prGamma) {
+            auto it = sw_ga[0].find(pk);
+            for (const auto& [k, w] : sg) {
+              if (it != sw_ga[0].end() && it->second.count(k)) continue;
+              (void)w;
+              const int p = k_hi(k), q = k_lo(k);
+              if (it == sw_ga[0].end()) ++so_outer_missing;
+              else if (!sw_ga[0].count(key2(p, q))) ++so_seed_not_direct;
+              else if (!E.end_ok(p, q)) ++so_seed_not_end;
+              else ++so_other;
+            }
+          }
+          std::fprintf(stderr,
+                       "[s-only] outer_pair_not_in_direct %lld seed_pair_not_in_direct %lld "
+                       "seed_not_end_ok %lld reachable_seed_but_missing %lld\n",
+                       so_outer_missing, so_seed_not_direct, so_seed_not_end, so_other);
+          {
+            // Per pair: share of states' outside mass in entries direct lacks.
+            std::vector<double> frac;
+            long long over1 = 0;
+            for (const auto& [pk, sg] : stem_->prGamma) {
+              const double all = sum_g(&sg);
+              if (all < HALF_NEG) continue;
+              auto it = sw_ga[0].find(pk);
+              std::unordered_map<uint64_t, double> miss;
+              for (const auto& [k, w] : sg)
+                if (it == sw_ga[0].end() || !it->second.count(k)) miss.emplace(k, w);
+              const double m = sum_g(&miss);
+              const double f = m < HALF_NEG ? 0.0 : std::exp(m - all);
+              frac.push_back(f);
+              if (f > 0.01) ++over1;
+            }
+            double fm = 0, fmed = 0;
+            if (!frac.empty()) {
+              fm = *std::max_element(frac.begin(), frac.end());
+              std::nth_element(frac.begin(), frac.begin() + static_cast<long>(frac.size() / 2), frac.end());
+              fmed = frac[frac.size() / 2];
+            }
+            std::fprintf(stderr, "[s-only] mass share per pair: max %.4f med %.4g pairs>1%% %lld of %zu\n",
+                         fm, fmed, over1, frac.size());
+            // Largest missing entries by share of their pair's states mass.
+            struct Mi {
+              double f;
+              int x, y, p, q;
+            };
+            std::vector<Mi> top;
+            for (const auto& [pk, sg] : stem_->prGamma) {
+              const double all = sum_g(&sg);
+              if (all < HALF_NEG) continue;
+              auto it = sw_ga[0].find(pk);
+              for (const auto& [k, w] : sg) {
+                if (it != sw_ga[0].end() && it->second.count(k)) continue;
+                std::unordered_map<uint64_t, double> one{{k, w}};
+                const double s1 = sum_g(&one);
+                if (s1 < HALF_NEG) continue;
+                top.push_back({std::exp(s1 - all), k_hi(pk), k_lo(pk), k_hi(k), k_lo(k)});
+              }
+            }
+            std::sort(top.begin(), top.end(), [](const Mi& a, const Mi& b) { return a.f > b.f; });
+            for (size_t t = 0; t < top.size() && t < 8; ++t)
+              std::fprintf(stderr, "[s-only] top pair %d.%d entry %d.%d share %.4f end_ok %d/%d\n",
+                           top[t].x, top[t].y, top[t].p, top[t].q, top[t].f,
+                           E.end_ok(top[t].x, top[t].y) ? 1 : 0, E.end_ok(top[t].p, top[t].q) ? 1 : 0);
+          }
+          // Identity on the common pair set (states' 2948 pairs).
+          std::vector<double> cerr;
+          // Signed: log(direct sum) - log(Qb_b), and states' sum vs Qb_b, split by end_ok.
+          long long c_up[2] = {}, c_dn[2] = {}, c_eq[2] = {}, c_dneg[2] = {}, c_rneg[2] = {};
+          long long s_bad[2] = {};
+          std::vector<double> dlog[2];
+          for (const auto& [pk, sg] : stem_->prGamma) {
+            const int i = k_hi(pk), j = k_lo(pk);
+            const double ref = stem_->prQb_b[static_cast<size_t>(i) * n + j];
+            auto it = sw_ga[0].find(pk);
+            const double got = sum_g(it == sw_ga[0].end() ? nullptr : &it->second);
+            cerr.push_back(rel(got, ref));
+            const int e = E.end_ok(i, j) ? 1 : 0;
+            if (rel(sum_g(&sg), ref) > 1e-9) ++s_bad[e];
+            if (ref < HALF_NEG) ++c_rneg[e];
+            else if (got < HALF_NEG) ++c_dneg[e];
+            else {
+              const double d = got - ref;
+              dlog[e].push_back(d);
+              if (d > 1e-9) ++c_up[e];
+              else if (d < -1e-9) ++c_dn[e];
+              else ++c_eq[e];
+            }
+          }
+          for (int e = 1; e >= 0; --e) {
+            double mn = 0, md = 0, mxd = 0;
+            if (!dlog[e].empty()) {
+              mn = *std::min_element(dlog[e].begin(), dlog[e].end());
+              mxd = *std::max_element(dlog[e].begin(), dlog[e].end());
+              std::nth_element(dlog[e].begin(), dlog[e].begin() + static_cast<long>(dlog[e].size() / 2),
+                               dlog[e].end());
+              md = dlog[e][dlog[e].size() / 2];
+            }
+            std::fprintf(stderr,
+                         "[out-id-signed] %s states_bad %lld Qb_b_neg %lld direct_neg %lld "
+                         "direct>Qb_b %lld direct<Qb_b %lld equal %lld dlog min %.4f med %.4f max %.4f\n",
+                         e ? "end_ok" : "GU", s_bad[e], c_rneg[e], c_dneg[e], c_up[e], c_dn[e], c_eq[e],
+                         mn, md, mxd);
+          }
+          if (!cerr.empty()) {
+            const double cmx = *std::max_element(cerr.begin(), cerr.end());
+            std::nth_element(cerr.begin(), cerr.begin() + static_cast<long>(cerr.size() / 2), cerr.end());
+            std::fprintf(stderr, "[out-id] G-direct-common pairs %zu max_rel %.3e med_rel %.3e\n",
+                         cerr.size(), cmx, cerr[cerr.size() / 2]);
+          }
         }
       }
     }
@@ -21149,6 +21396,22 @@ int main(int argc, char** argv) {
       }
     }
     else if (arg == "--out-id") g_out_id = true;
+    else if (arg == "--g-cut-at") {
+      const std::string s = next();
+      if (s == "pair") g_cut_pair_only = true;
+      else if (s == "all") g_cut_pair_only = false;
+      else {
+        std::fprintf(stderr, "--g-cut-at needs all or pair\n");
+        return 2;
+      }
+    }
+    else if (arg == "--g-trace") {
+      const std::string s = next();
+      if (std::sscanf(s.c_str(), "%d,%d,%d,%d", &g_trace_p, &g_trace_q, &g_trace_x, &g_trace_y) < 2) {
+        std::fprintf(stderr, "--g-trace needs P,Q[,X,Y]\n");
+        return 2;
+      }
+    }
     else if (arg == "--grow-node-trunc-r") {
       g_ntr_KR = std::max(-1, std::atoi(next()));
     }

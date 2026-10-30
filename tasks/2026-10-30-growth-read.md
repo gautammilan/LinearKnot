@@ -71,3 +71,50 @@ and Multi→Multi (E4 multi-ext). E5–E8 are branch edges Qm/Qm2→pair. V's id
 
 RP486 topq logZ from the earlier gcut matrix (440.02910384486495); the rerun is still going.
 NUPACK refs: Ther 327.5433 (topq -0.146, direct -0.146, states -12.761), Deha 235.1604, Pseu 215.7890.
+
+## Ther diagnosis (signed dlogZ vs NUPACK exact 327.54328498495346)
+
+Binary `dp03_diag7` (adds `--g-cut-at all|pair`, `--g-trace P,Q[,X,Y]`, and the `--out-id` breakdowns
+below). Ther, paper preset, `--g-sweep states` unless noted.
+
+| run | logZ | dlogZ vs exact | G fill s | peak RSS MB |
+|---|---:|---:|---:|---:|
+| topq bG 32 (default) | 327.39777562 | -0.145509 | 1617 | 3212 |
+| direct entries bG 128 | 327.39737672 | -0.145908 | 254 | 1489 |
+| states bG 128 | 314.78248426 | -12.760801 | 90 | 1471 |
+| states no cut (bG 1e8) | 327.39782478 | **-0.145460** | 679 | 8280 |
+| states bG 128, cut at pair states only | 314.78248430 | -12.760801 | 163 | 1748 |
+| states bG 256 | 327.39766236 | -0.145623 | 165 | 1829 |
+| states bG 512 | 327.39764313 | -0.145642 | 319 | 2624 |
+
+No cut is above topq by 4.9e-5, so the loss is the cut, not the nested growth model.
+
+Which cut: Ther's main crossing stems from the bpp (1-based) are A 31-203 .. 40-194 (min p 0.95)
+and B 41-296 .. 48-289 (0.88). 0-based trace at bG 128:
+
+- A, entry (30,202), root (39,193): the entry exists only in the map of pair (30,202) itself,
+  where it is the stop-term seed, and is dropped there: rank 158 of 498, score 127.72 vs the 128th
+  131.63. Seen at 1 pair state, 0 Qm, 0 Qm2. G(39,193) ends with 128 entries, none (30,202).
+- B, entry (40,295), root (47,288): same, dropped at pair (40,295), rank 182 of 434.
+
+The cut scores the seed as an exterior-loop pair, C_pre(p'-1) * E.at * S_pre(q'+1). In the nested
+model (30,202) sits inside the 12-314 helix (p 0.99), so its exterior score is low next to the
+entries pushed from that helix. For a pseudoknot stem the seed's real outside is the pseudoknot,
+not the nested exterior. Cutting only at pair states gives the same loss (Qm/Qm2 cuts are not
+involved); bG 256 keeps the seed and recovers.
+
+## Item 4: the 1,107 pairs and the 48,426 entries (RP150, uncapped)
+
+- The earlier "1,107 pairs with no pass-1 outside" was wrong. All 4,045 pairs in both tables have
+  finite Qb_b. The 1,097 pairs outside the 2,948 checked are GU/UG pairs (`end_ok` false, cannot be
+  terminal), which the check skipped. Counting them, G states matches Qb_b on all 4,045 (GU too).
+  The infinite max for direct came from 40 pairs where direct's G is empty (see next item).
+- The 48,426 states-only entries are direct's topq cut. It runs even when the map is under K and
+  drops every q' with ntrUL[q'] = -inf (e.g. q' = n-1; the largest are stop terms x.149, share 1.0
+  of their pair). With `--g-cut entries` on the direct side the entry sets are equal (0 / 0).
+- Values still differ. Direct is below Qb_b on every pair that differs (none above): median
+  log(direct/Qb_b) -1.13 (end_ok) / -1.11 (GU), min -9.8. The nearest mismatches are interior
+  loops with 6 unpaired bases (-0.0011); at 5% the nearest is a 7-base left gap (-1.94). The
+  multiloop constants are the same values under rna1999/DP03 (a_p = alpha1 = 3.4, b_p = alpha2 =
+  0.4, c_p = alpha3 = 0) and pair_bonus is 0, so they are not the cause; the remaining gap is
+  not yet localized (dangles none can't test it: the identity fails for V and G states there too).
