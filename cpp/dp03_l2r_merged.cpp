@@ -7503,36 +7503,55 @@ class DP03 {
       else it->second = log_add(it->second, w);
     };
     const StemEst& st = *stem_;
-    // Cap a pair's map before it is pushed. Rank is C_pre(p'-1) + gamma + the same q' key
-    // rec_root uses (u_L, or Sbar when --g-key suffix). Entries past n_G do not propagate.
+    // Cap a pair's map before it is pushed. Match lazy L trunc: rank by q' with
+    // g+ntrUL (or Sbar if --g-key suffix), keep top K q', and retain *all* (p',q')
+    // mass for those q'. Truncating individual (p',q') keys (old behavior) dropped
+    // alternate p' for a kept q' and broke Ther n=63 T[0] (e.g. missing q=55).
     auto cap_ga = [&](Ga& m) {
       const int K = g_ntr_K;
-      if (K <= 0 || static_cast<int>(m.size()) <= K) return;
-      struct E {
-        uint64_t k;
-        double w, s;
-      };
-      std::vector<E> v;
-      v.reserve(m.size());
+      if (K <= 0 || m.empty()) return;
+      std::unordered_map<int, double> byq;
       for (const auto& [k, w] : m) {
         if (w < HALF_NEG) continue;
         const int p = k_hi(k), q = k_lo(k);
-        double s = w;
-        if (p > 0 && !st.prC.empty()) s += st.prC[static_cast<size_t>(p - 1)];
-        const double sb = st.prS[static_cast<size_t>(q + 1)];
-        if (sb < HALF_NEG) continue;
-        s += sb;
-        v.push_back({k, w, s});
+        double g = w;
+        if (p > 0 && !st.prC.empty()) g += st.prC[static_cast<size_t>(p - 1)];
+        auto it = byq.find(q);
+        if (it == byq.end()) byq.emplace(q, g);
+        else it->second = log_add(it->second, g);
       }
-      if (static_cast<int>(v.size()) > K) {
-        std::nth_element(v.begin(), v.begin() + K, v.end(), [](const E& a, const E& b) {
-          if (a.s != b.s) return a.s > b.s;
-          return a.k < b.k;
-        });
-        v.resize(static_cast<size_t>(K));
+      struct E {
+        int q;
+        double s;
+      };
+      std::vector<E> v;
+      v.reserve(byq.size());
+      for (const auto& [q, g] : byq) {
+        double s = NEG_INF;
+        if (p2_g_suffix) {
+          const double sb = st.prS[static_cast<size_t>(q + 1)];
+          if (sb > HALF_NEG) s = g + sb;
+        } else if (q >= 0 && q < static_cast<int>(ntrUL.size()) && ntrUL[q] > HALF_NEG) {
+          s = g + ntrUL[q];
+        }
+        if (s > HALF_NEG) v.push_back({q, s});
       }
-      m.clear();
-      for (const E& e : v) m.emplace(e.k, e.w);
+      if (static_cast<int>(v.size()) <= K) return;
+      std::nth_element(v.begin(), v.begin() + K, v.end(), [](const E& a, const E& b) {
+        if (a.s != b.s) return a.s > b.s;
+        return a.q < b.q;
+      });
+      v.resize(static_cast<size_t>(K));
+      std::unordered_set<int> keep;
+      keep.reserve(v.size());
+      for (const E& e : v) keep.insert(e.q);
+      Ga out;
+      out.reserve(m.size());
+      for (const auto& [k, w] : m) {
+        if (w < HALF_NEG) continue;
+        if (keep.count(k_lo(k))) out.emplace(k, w);
+      }
+      m.swap(out);
     };
     std::vector<char> fin(static_cast<size_t>(n), 0);
     const int S = pr_ml_span;
@@ -10525,6 +10544,8 @@ class DP03 {
   RN sw_as_rn(int x, int y, bool inner) {
     if (p2_sweep && l2r_mode != 0 && stem_ && !sw_filled) {
       sw_filled = true;
+      // ntrUL must exist before sw_fill's cap_ga (same L trunc key as racc_finish_trunc).
+      if (g_ntr_K > 0 && !p2_g_suffix) ntr_init();
       sw_fill(0, n);
       sw_fill(1, std::min(pr_loop, cap));
     }
@@ -10604,12 +10625,40 @@ class DP03 {
   const RN& rec_root(int x, int y, bool inner) {
     const uint64_t key = key3(x, y, inner ? 1 : 0);
     auto it = prRR.find(key);
-    if (it != prRR.end()) return it->second;
+    const bool dump_focus = std::getenv("DUMP_ROOT") &&
+                            ((x == 4 && y == 35) || (x == 9 && y == 37) || (x == 9 && y == 41));
+    auto dump_t0 = [&](const RN& placed) {
+      if (!dump_focus) return;
+      std::fprintf(stderr,
+                   "DUMP_ROOT_CREATE\tx\t%d\ty\t%d\tinner\t%d\tp2_sweep\t%d\tK\t%d\tntr\t%d\n", x, y,
+                   inner ? 1 : 0, p2_sweep ? 1 : 0, g_ntr_K, ntrUL.empty() ? 0 : 1);
+      if (!placed.T[0].empty()) {
+        for (const auto& e : placed.T[0])
+          std::fprintf(stderr, "DUMP_ROOT_T0\tx\t%d\ty\t%d\tq\t%d\tg\t%.17g\n", x, y, e.first,
+                       e.second);
+        std::fprintf(stderr, "DUMP_ROOT_T0META\tx\t%d\ty\t%d\tn\t%zu\tsrc\tT0\n", x, y,
+                     placed.T[0].size());
+      } else {
+        auto lam = lamL(placed);
+        for (const auto& e : lam)
+          std::fprintf(stderr, "DUMP_ROOT_T0\tx\t%d\ty\t%d\tq\t%d\tg\t%.17g\n", x, y, e.first,
+                       e.second);
+        std::fprintf(stderr, "DUMP_ROOT_T0META\tx\t%d\ty\t%d\tn\t%zu\tsrc\tlamL\n", x, y, lam.size());
+      }
+    };
+    if (it != prRR.end()) {
+      if (dump_focus)
+        std::fprintf(stderr, "DUMP_ROOT_HIT\tx\t%d\ty\t%d\tinner\t%d\tp2_sweep\t%d\n", x, y,
+                     inner ? 1 : 0, p2_sweep ? 1 : 0);
+      return it->second;
+    }
     if (p2_sweep) {
       PrGrowTimer gt(*this);
       RN r = sw_as_rn(x, y, inner);
       ++rn_roots;
-      return prRR.emplace(key, std::move(r)).first->second;
+      auto& placed = prRR.emplace(key, std::move(r)).first->second;
+      dump_t0(placed);
+      return placed;
     }
     PrGrowTimer gt(*this);
     std::vector<ChainNbr> nb;
@@ -10623,7 +10672,9 @@ class DP03 {
     rec_stat(1, r);
     gm_roots += rbytes(r);
     gm_update();
-    return prRR.emplace(key, std::move(r)).first->second;
+    auto& placed = prRR.emplace(key, std::move(r)).first->second;
+    dump_t0(placed);
+    return placed;
   }
   const RN& rec_key(bool ls, int p, bool seed, int q) {
     const auto tick = []() { return std::chrono::steady_clock::now(); };
@@ -10659,6 +10710,90 @@ class DP03 {
     auto placed = m.emplace(key, std::move(r)).first;
     charge(tick());
     return placed->second;
+  }
+
+  // DUMP_P2_ALL=prefix: write Lambda_L/R (roots+nodes+keys), V-key lists, Qz_pre for offline
+  // sweep-vs-lazy comparison (Ther |d| gap diagnosis).
+  void dump_p2_all(const char* prefix) const {
+    if (!prefix || !*prefix) return;
+    auto dec3 = [](uint64_t k, int& a, int& b, int& c) {
+      a = static_cast<int>(k >> 42);
+      b = static_cast<int>((k >> 21) & 0x1fffff);
+      c = static_cast<int>(k & 0x1fffff);
+    };
+    auto wmap = [&](const char* tag, const std::unordered_map<uint64_t, RN>& M, int side) {
+      std::string path = std::string(prefix) + "." + tag + ".tsv";
+      std::ofstream out(path);
+      out << "key\tx\ty\tinner\ti\tg\n";
+      for (const auto& [k, r] : M) {
+        int x, y, inn;
+        dec3(k, x, y, inn);
+        if (g_ntr_K > 0) {
+          for (const auto& e : r.T[side])
+            out << k << '\t' << x << '\t' << y << '\t' << inn << '\t' << e.first << '\t'
+                << std::setprecision(17) << e.second << '\n';
+        } else {
+          const RV& a = side ? r.R[0] : r.L[0];
+          for (size_t i = 0; i < a.v.size(); ++i) {
+            if (!(a.v[i] > 0.0)) continue;
+            out << k << '\t' << x << '\t' << y << '\t' << inn << '\t' << (a.lo + (int)i) << '\t'
+                << std::setprecision(17) << (a.mx + std::log(a.v[i])) << '\n';
+          }
+        }
+      }
+      std::fprintf(stderr, "[dump-p2] %s n=%zu\n", path.c_str(), M.size());
+    };
+    auto wkey = [&](const char* tag, const std::unordered_map<int, RN>& M, int side) {
+      std::string path = std::string(prefix) + "." + tag + ".tsv";
+      std::ofstream out(path);
+      out << "key\ti\tg\n";
+      for (const auto& [k, r] : M) {
+        if (g_ntr_K > 0) {
+          for (const auto& e : r.T[side])
+            out << k << '\t' << e.first << '\t' << std::setprecision(17) << e.second << '\n';
+        }
+      }
+      std::fprintf(stderr, "[dump-p2] %s n=%zu\n", path.c_str(), M.size());
+    };
+    wmap("Lambda_L_root", prRR, 0);
+    wmap("Lambda_R_root", prRR, 1);
+    wmap("Lambda_L_node", prRG, 0);
+    wmap("Lambda_R_node", prRG, 1);
+    wkey("K_L_ls", prRKls, 0);
+    wkey("K_R_ls", prRKls, 1);
+    wkey("K_L_rs", prRKrs, 0);
+    wkey("K_R_rs", prRKrs, 1);
+    for (int s = 0; s < 2; ++s) {
+      std::string path = std::string(prefix) + ".V_s" + std::to_string(s) + ".tsv";
+      std::ofstream out(path);
+      out << "xs\ty\tw\n";
+      for (const auto& [xs, vec] : prVkey[s])
+        for (const auto& e : vec)
+          out << xs << '\t' << e.first << '\t' << std::setprecision(17) << e.second << '\n';
+      std::fprintf(stderr, "[dump-p2] %s keys=%zu\n", path.c_str(), prVkey[s].size());
+    }
+    if (stem_) {
+      std::string path = std::string(prefix) + ".Qz_pre.tsv";
+      std::ofstream out(path);
+      out << "i\tj\tz\n";
+      long long nq = 0;
+      if (!stem_->qz_col.empty()) {
+        for (int j = 0; j < n; ++j)
+          for (const auto& e : stem_->qz_col[static_cast<size_t>(j)]) {
+            out << e.k << '\t' << j << '\t' << std::setprecision(17) << e.q << '\n';
+            ++nq;
+          }
+      } else if (!stem_->prQz.empty()) {
+        for (int i = 0; i < n; ++i)
+          for (int j = i; j < n; ++j) {
+            const double z = stem_->prQz[static_cast<size_t>(i) * n + j];
+            if (z < HALF_NEG) continue;
+            out << i << '\t' << j << '\t' << std::setprecision(17) << z << '\n';
+            ++nq;
+          }
+      }
+      std::fprintf(stderr, "[dump-p2] %s n=%lld\n", path.c_str(), nq);
+    }
   }
 
   // --grow-trunc: the kept (index, log g) of g_L (q') and g_R (p') of an evaluated root / key,
@@ -20999,10 +21134,9 @@ int main(int argc, char** argv) {
   std::fprintf(stderr, "[arity] b2 %d b4 %d pbeam %d,%d,%d\n", b2_width, beam, l2r_pbeam[0],
                l2r_pbeam[1], l2r_pbeam[2]);
   if (!rlt_beam_set) rlt_beam = beam;
-  // Default sweep OFF: growth uses rec_node/pr_steps (hard14/OLD). Unset --sweep
-  // previously forced p2_sweep and routed rec_root through sw_as_rn (Ther |d|~5.7).
-  // Pass `--sweep` / `--sweep on` for the sweep backend.
-  if (!sweep_set) p2_sweep = false;
+  // Default sweep ON: sw_as_rn with q'-aware intermediate cap (= lazy trunc key).
+  // Pass `--sweep off` for rec_node/pr_steps (hard14/OLD path).
+  if (!sweep_set) p2_sweep = true;
   if (!vsweep_set) p2_vsweep = true;
 
   if (arm_score && access_file.empty()) {
@@ -22925,6 +23059,10 @@ int main(int argc, char** argv) {
                   stem_ext_max);
     }
 
+    if (const char* p2dump = std::getenv("DUMP_P2_ALL")) {
+      dp.outside();
+      dp.dump_p2_all(p2dump);
+    }
     if (!id.empty()) std::printf(">%s\n", id.c_str());
     std::printf("logZ %.17g\n", logz);
     std::printf("sec %.6f\n", sec);
