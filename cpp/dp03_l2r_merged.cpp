@@ -58,6 +58,8 @@
 // --b4 N: four-index scan beam (was --beam). Unset: 1000 under --pk-l2r on defaults, else 0.
 // --bV N: V left-end cap per map (was --v-cap / --pr-v-cap). Sets both p2_v_cap and pr_vcap.
 // --bG N: growth node trunc K (was --grow-node-trunc). Unset: 16 when grow-rec defaults apply.
+// --g-cut topq|collapse|entries: sw_fill node cap (default topq). topq = all p' for top-bG q';
+//   collapse = Ghat of size bG; entries = top-bG raw (p',q') by C_pre*G*S_pre.
 // --qzbar-old: build StemEst Qzbar as the Oct-8/incperf path does — dense full nested Qz→prQz,
 //   no beamed sparse Qz_pre (qz_on). Used by H_ex, K_L, pr_sf_build, and every other Qzbar read.
 // --b1 N: --nest-beam N, the nested pre-pass and the stem-estimate run at every length.
@@ -227,6 +229,12 @@ static double g_tr_eps = 1e-6;
 // time, built from its terms' lists; the full layer vectors are never stored.
 static int g_ntr_K = 0;
 static FILE* g_mass_f = nullptr;
+// --g-cut topq|collapse|entries: how sw_fill caps each growth node (default topq).
+//   topq:     ca8cd5e — top-bG q' by Ghat+ntrUL (or Sbar); retain all (p',q') for those q'.
+//   collapse: Ghat[q'] = sum_p' G[p',q'] * C_pre(p'-1), bG entries as key2(0,q').
+//   entries:  pass2_push_edges — top-bG raw (p',q') by C_pre(p'-1)*G*S_pre(q'+1).
+enum { G_CUT_TOPQ = 0, G_CUT_COLLAPSE = 1, G_CUT_ENTRIES = 2 };
+static int g_cut = G_CUT_TOPQ;
 // --grow-node-trunc-r KR: K of the R side (0: K; -1: R not truncated, stored dense in R[0], the
 // layers summed)
 static int g_ntr_KR = 0;
@@ -7510,18 +7518,50 @@ class DP03 {
       else it->second = log_add(it->second, w);
     };
     const StemEst& st = *stem_;
-    // Cap a pair's map before it is pushed. Match lazy L trunc: rank by q' with
-    // g+ntrUL (or Sbar if --g-key suffix), keep top K q', and retain *all* (p',q')
-    // mass for those q'. Truncating individual (p',q') keys (old behavior) dropped
-    // alternate p' for a kept q' and broke Ther n=63 T[0] (e.g. missing q=55).
+    // Cap a pair's map before it is pushed (--g-cut). See g_cut enum at file scope.
     auto cap_ga = [&](Ga& m) {
       const int K = g_ntr_K;
       if (K <= 0 || m.empty()) return;
+      if (g_cut == G_CUT_ENTRIES) {
+        // Top-K raw (p',q') by C_pre(p'-1) * G * S_pre(q'+1). Scan still applies Chat at read.
+        struct E {
+          uint64_t k;
+          double w, s;
+        };
+        std::vector<E> v;
+        v.reserve(m.size());
+        for (const auto& [k, w] : m) {
+          if (w < HALF_NEG) continue;
+          const int p = k_hi(k), q = k_lo(k);
+          double s = w;
+          if (p > 0 && !st.prC.empty()) s += st.prC[static_cast<size_t>(p - 1)];
+          if (q + 1 < 0 || q + 1 >= static_cast<int>(st.prS.size())) continue;
+          const double sb = st.prS[static_cast<size_t>(q + 1)];
+          if (sb < HALF_NEG) continue;
+          s += sb;
+          v.push_back({k, w, s});
+        }
+        if (static_cast<int>(v.size()) > K) {
+          std::nth_element(v.begin(), v.begin() + K, v.end(), [](const E& a, const E& b) {
+            if (a.s != b.s) return a.s > b.s;
+            return a.k < b.k;
+          });
+          v.resize(static_cast<size_t>(K));
+        }
+        Ga out;
+        out.reserve(v.size());
+        for (const E& e : v) out.emplace(e.k, e.w);
+        m.swap(out);
+        return;
+      }
+      // topq and collapse: rank by q' with Ghat[q'] = sum_p' G*C_pre (+ ntrUL / Sbar).
       std::unordered_map<int, double> byq;
+      byq.reserve(m.size());
       for (const auto& [k, w] : m) {
         if (w < HALF_NEG) continue;
         const int p = k_hi(k), q = k_lo(k);
         double g = w;
+        // Collapse stores key2(0,q') with Chat already applied.
         if (p > 0 && !st.prC.empty()) g += st.prC[static_cast<size_t>(p - 1)];
         auto it = byq.find(q);
         if (it == byq.end()) byq.emplace(q, g);
@@ -7529,7 +7569,7 @@ class DP03 {
       }
       struct E {
         int q;
-        double s;
+        double g, s;
       };
       std::vector<E> v;
       v.reserve(byq.size());
@@ -7541,14 +7581,23 @@ class DP03 {
         } else if (q >= 0 && q < static_cast<int>(ntrUL.size()) && ntrUL[q] > HALF_NEG) {
           s = g + ntrUL[q];
         }
-        if (s > HALF_NEG) v.push_back({q, s});
+        if (s > HALF_NEG) v.push_back({q, g, s});
       }
-      if (static_cast<int>(v.size()) <= K) return;
-      std::nth_element(v.begin(), v.begin() + K, v.end(), [](const E& a, const E& b) {
-        if (a.s != b.s) return a.s > b.s;
-        return a.q < b.q;
-      });
-      v.resize(static_cast<size_t>(K));
+      if (static_cast<int>(v.size()) > K) {
+        std::nth_element(v.begin(), v.begin() + K, v.end(), [](const E& a, const E& b) {
+          if (a.s != b.s) return a.s > b.s;
+          return a.q < b.q;
+        });
+        v.resize(static_cast<size_t>(K));
+      }
+      if (g_cut == G_CUT_COLLAPSE) {
+        Ga out;
+        out.reserve(v.size());
+        for (const E& e : v) out.emplace(key2(0, e.q), e.g);
+        m.swap(out);
+        return;
+      }
+      // topq: retain all raw (p',q') mass for the kept q'.
       std::unordered_set<int> keep;
       keep.reserve(v.size());
       for (const E& e : v) keep.insert(e.q);
@@ -18720,6 +18769,7 @@ std::string normalize(const std::string& s) {
 void usage() {
   std::fprintf(stderr,
                "usage: dp03_cpp [--b1 N] [--b2 N] [--b4 N] [--bV N] [--bG N] "
+               "[--g-cut topq|collapse|entries] "
                "[--loop-cap L] [--ml-lead-cap N|n] [--max-loop M] [--no-gu] [--rt RT] "
                "[--no-single-stems] [--wc-ends] "
                "[--score qz|prefix] [--no-pk] [--cutoff C] [--no-bpp] [--gap-beam group|step] "
@@ -20799,6 +20849,16 @@ int main(int argc, char** argv) {
     else if (arg == "--bG") {
       g_ntr_K = std::atoi(next());
     }
+    else if (arg == "--g-cut") {
+      const std::string s = next();
+      if (s == "topq") g_cut = G_CUT_TOPQ;
+      else if (s == "collapse") g_cut = G_CUT_COLLAPSE;
+      else if (s == "entries") g_cut = G_CUT_ENTRIES;
+      else {
+        std::fprintf(stderr, "--g-cut must be topq, collapse, or entries\n");
+        return 2;
+      }
+    }
     else if (arg == "--grow-node-trunc-r") {
       g_ntr_KR = std::max(-1, std::atoi(next()));
     }
@@ -22641,12 +22701,14 @@ int main(int argc, char** argv) {
                               : 0.0;
         const double work_per_out =
             mean_out > 0.0 ? mean_in / mean_out : 0.0;
+        const char* gcut =
+            g_cut == G_CUT_COLLAPSE ? "collapse" : (g_cut == G_CUT_ENTRIES ? "entries" : "topq");
         std::fprintf(stderr,
-                     "[g-read] n %d bG %d ntr_init_sec %.6f sw_fill_sec %.6f sw_as_rn_calls %lld "
-                     "sw_as_rn_sec %.6f ms_per_read %.4f ent_in_mean %.1f ent_out_mean %.1f "
-                     "work_per_out %.1f ga_nodes %lld ga_ent_mean %.1f ga_ent_max %lld "
-                     "rn_keys %lld grow_sec %.6f\n",
-                     static_cast<int>(seq.size()), g_ntr_K, dp.sw_ntr_init_sec, dp.sw_fill_sec,
+                     "[g-read] n %d bG %d g_cut %s ntr_init_sec %.6f sw_fill_sec %.6f "
+                     "sw_as_rn_calls %lld sw_as_rn_sec %.6f ms_per_read %.4f ent_in_mean %.1f "
+                     "ent_out_mean %.1f work_per_out %.1f ga_nodes %lld ga_ent_mean %.1f "
+                     "ga_ent_max %lld rn_keys %lld grow_sec %.6f\n",
+                     static_cast<int>(seq.size()), g_ntr_K, gcut, dp.sw_ntr_init_sec, dp.sw_fill_sec,
                      dp.sw_as_rn_calls, dp.sw_as_rn_sec,
                      dp.sw_as_rn_calls > 0 ? 1e3 * dp.sw_as_rn_sec / static_cast<double>(dp.sw_as_rn_calls)
                                           : 0.0,
