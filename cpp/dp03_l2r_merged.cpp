@@ -55,13 +55,16 @@
 //   with Qm while Qm2's beam is finite, then held to its own beam.
 // --b2 N: beam of the scan's two-index columns Qb, Qm, Qm2, Qp, Qmp, and of Q^z / Q^z_pre
 //   (writes those --beam-table entries; a later --beam-table wins for that table). Unset: 200.
+// --b4 N: four-index scan beam (was --beam). Unset: 1000 under --pk-l2r on defaults, else 0.
+// --bV N: V left-end cap per map (was --v-cap / --pr-v-cap). Sets both p2_v_cap and pr_vcap.
+// --bG N: growth node trunc K (was --grow-node-trunc). Unset: 16 when grow-rec defaults apply.
 // --qzbar-old: build StemEst Qzbar as the Oct-8/incperf path does — dense full nested Qz→prQz,
 //   no beamed sparse Qz_pre (qz_on). Used by H_ex, K_L, pr_sf_build, and every other Qzbar read.
 // --b1 N: --nest-beam N, the nested pre-pass and the stem-estimate run at every length.
-//   Unset: 200, independent of --beam. 0 keeps every state.
-// --pbeam-ratio a:b:c: P1,P2,P3 beams = (a,b,c) times --beam. Unset: P1 is two-index, so
-//   its beam is b2; P2 and P3 stay 2 x b4 (the pk-l2r default 2000,2000 at b4 = 1000).
+//   Unset: 200, independent of --b4. 0 keeps every state.
+// --pbeam-ratio a:b:c: P1,P2,P3 beams = (a,b,c) times --b4. Unset: pbeam = (b2, b4, b4).
 //   An explicit --l2r-pbeam or --pbeam-ratio on the command line wins.
+// Removed (error if passed): --beam, --v-cap, --pr-v-cap, --grow-node-trunc.
 // --dump-states PATH: after outside, every stored state's posterior weight (format at
 //   DP03::dump_states); run at --beam inf for exact weights.  --dump-min-w W: write only
 //   states with w >= W (the rest are summed per table).
@@ -18689,7 +18692,8 @@ std::string normalize(const std::string& s) {
 
 void usage() {
   std::fprintf(stderr,
-               "usage: dp03_cpp [--beam B] [--loop-cap L] [--ml-lead-cap N|n] [--max-loop M] [--no-gu] [--rt RT] "
+               "usage: dp03_cpp [--b1 N] [--b2 N] [--b4 N] [--bV N] [--bG N] "
+               "[--loop-cap L] [--ml-lead-cap N|n] [--max-loop M] [--no-gu] [--rt RT] "
                "[--no-single-stems] [--wc-ends] "
                "[--score qz|prefix] [--no-pk] [--cutoff C] [--no-bpp] [--gap-beam group|step] "
                "[--params dp03|dp09|dp09st|dp09ml|dp09full] "
@@ -18700,7 +18704,7 @@ void usage() {
                "[--gate-role stem1|both] [--gate-tables qg|qgl|qg,qgl] [--gate-reserve K]] "
                "[--gate-stats] [--gate-diag PATH [--gate-diag-taus T1,T2,...] "
                "[--gate-long-span L]] "
-               "[--b2 N] [--b1 N] [--qzbar-old] [--pbeam-ratio a:b:c] "
+               "[--qzbar-old] [--pbeam-ratio a:b:c] "
                "[--beam-table T=B ...] [--dump-states PATH [--dump-min-w W]] "
                "[--dump-pruned PATH [--dump-exact PATH [--dump-pruned-min-w X]]] "
                "[--remove-state T,a,b,c,d ...] "
@@ -19935,8 +19939,9 @@ int main(int argc, char** argv) {
   int pr_abl_pk = 0;                        // --pr-abl-pk
   double pr_veps = 1e-8;                                // --pr-v-eps (0: no trimming)
   bool pr_vsuffix = false;                              // --pr-v-trim global|suffix
-  int pr_vcap = 0;                                      // --pr-v-cap N (0: none)
+  int pr_vcap = 0;                                      // --bV (was --pr-v-cap); default 256
   int p2_qz_beam = 0, p2_qz_key = 1, p2_v_mode = 0, p2_v_bp = 0, p2_v_cap = 0, p2_v_trim = 0;
+  bool bV_set = false;
   int p2_g_mode = 0, p2_g_bp = 0, p2_g_cap = 0, nest_beam = -1, pre_beam = 0, pre_key = 0;
   bool b1_set = false, rlt_beam_set = false, sweep_set = false, vsweep_set = false;
   int b2_width = 0;
@@ -19967,11 +19972,11 @@ int main(int argc, char** argv) {
   std::string stem_diag_path;
   std::vector<int> stem_diag_loops = {0, 2, 6};
 
-  // --preset default|accurate expands in place to the paper configuration (options after it
-  // override it, options before it are overridden).  The energy model (--material, --dangles,
-  // --param-file) is not part of it.
-  // default  = beam 1000; the expanded --l2r-pbeam is 1000,2000,2000, then P1 is
-  //            replaced by b2 (two-index). accurate = beam 3000, same P1 replacement.
+  // --preset default|accurate expands in place (options after it override; before are
+  // overridden). Energy model (--material, --dangles, --param-file) is not part of it.
+  // Paper beams are --b1/--b2/--b4/--bV/--bG; pbeam is derived as (b2,b4,b4) unless
+  // --l2r-pbeam or --pbeam-ratio is given. accurate = paper values; default = smaller b4/bG.
+  // Scripts should pass --preset only (no extra beam flags).
 
   for (int a = 1; a < argc; ++a) {
     if (std::strcmp(argv[a], "--l2r-pbeam") == 0) user_pbeam = true;
@@ -19986,8 +19991,17 @@ int main(int argc, char** argv) {
         return 2;
       }
       const bool acc = (p == "accurate");
-      args_s.push_back("--beam");
+      // Paper preset beams (accurate) / smaller default. pbeam = (b2,b4,b4) after parse.
+      args_s.push_back("--b1");
+      args_s.push_back("200");
+      args_s.push_back("--b2");
+      args_s.push_back(acc ? "1000" : "200");
+      args_s.push_back("--b4");
       args_s.push_back(acc ? "3000" : "1000");
+      args_s.push_back("--bV");
+      args_s.push_back(acc ? "256" : "512");
+      args_s.push_back("--bG");
+      args_s.push_back(acc ? "32" : "16");
       for (const char* x :
            {"--gap-beam", "step", "--loop-cap", "30", "--max-loop", "30", "--wc-ends", "--rt", "0.6163207755",
             "--cutoff", "1e-5", "--stem-est", "rank", "--stem-est-role", "all", "--stem-est-loop", "0",
@@ -19996,12 +20010,13 @@ int main(int argc, char** argv) {
             "--stem-est-principled", "on", "--pr-partner-floor", "1e-20", "--pr-grow-select", "bound",
             "--pr-grow-eps", "1e-6", "--pr-cut", "0", "--pr-armq-sep", "on", "--pr-fast", "ml", "--pr-abl", "sepv",
             "--grow-rec", "on", "--grow-ml-c", "16", "--grow-trunc", "16", "--grow-trunc-mode", "side",
-            "--pk-l2r", "on", "--l2r-spawn", "inc", "--l2r-pbeam", acc ? "3000,6000,6000" : "1000,2000,2000",
+            "--pk-l2r", "on", "--l2r-spawn", "inc",
             "--l2r-p3-hex", "on",
             "--l2r-p3-lin", "on", "--pr-ml-span", "100000", "--grow-ml-ub", "on", "--pr-v-key", "xs",
-            "--pr-v-eps", "0", "--pr-v-trim", "suffix", "--pr-v-cap", "512", "--pr-v-stream", "on",
-            "--pr-v-mlk", "0", "--grow-node-trunc", "16", "--grow-node-trunc-r", "-1",
-            "--grow-node-trunc-z", "bar", "--grow-r-from-v", "on", "--malloc-trim", "on"})
+            "--pr-v-eps", "0", "--pr-v-trim", "suffix", "--pr-v-stream", "on",
+            "--pr-v-mlk", "0", "--grow-node-trunc-r", "-1",
+            "--grow-node-trunc-z", "bar", "--grow-r-from-v", "on", "--malloc-trim", "on",
+            "--sweep", "on", "--v-sweep", "on", "--grammar", "full", "--ml-lead-cap", "30"})
         args_s.push_back(x);
     } else if (a > 0 && std::string(argv[a]) == "--stem-est-preset") {
       const std::string p = a + 1 < argc ? argv[++a] : "";
@@ -20039,7 +20054,11 @@ int main(int argc, char** argv) {
       }
       return argv[++a];
     };
-    if (arg == "--beam") {
+    if (arg == "--beam" || arg.rfind("--beam=", 0) == 0) {
+      std::fprintf(stderr, "--beam is removed; use --b4\n");
+      return 2;
+    }
+    else if (arg == "--b4") {
       std::string b = next();
       beam = (b == "inf" || b == "infinity" || b == "none") ? 0 : std::atoi(b.c_str());
     }
@@ -20715,9 +20734,16 @@ int main(int argc, char** argv) {
       }
       pr_vsuffix = s == "suffix";
     }
-    else if (arg == "--pr-v-cap") {
+    else if (arg == "--pr-v-cap" || arg.rfind("--pr-v-cap=", 0) == 0) {
+      std::fprintf(stderr, "--pr-v-cap is removed; use --bV\n");
+      return 2;
+    }
+    else if (arg == "--bV") {
       pr_set = true;
-      pr_vcap = std::max(0, std::atoi(next()));
+      bV_set = true;
+      const int n = std::max(0, std::atoi(next()));
+      pr_vcap = n;
+      p2_v_cap = n;  // one flag: xs-keyed cap and C_pre left-end cap
     }
     else if (arg == "--pr-v-mlsteps") {
       pr_vmlsteps = std::string(next()) == "on";
@@ -20738,7 +20764,12 @@ int main(int argc, char** argv) {
       pr_set = true;
       pr_vstream = std::string(next()) == "on";
     }
-    else if (arg == "--grow-node-trunc") {
+    else if (arg == "--grow-node-trunc" || arg.rfind("--grow-node-trunc=", 0) == 0) {
+      // Exact --grow-node-trunc only (not -r / -z).
+      std::fprintf(stderr, "--grow-node-trunc is removed; use --bG\n");
+      return 2;
+    }
+    else if (arg == "--bG") {
       g_ntr_K = std::atoi(next());
     }
     else if (arg == "--grow-node-trunc-r") {
@@ -20855,8 +20886,8 @@ int main(int argc, char** argv) {
       }
     }
     else if (arg == "--v-cap" || arg.rfind("--v-cap=", 0) == 0) {
-      const std::string s = arg == "--v-cap" ? next() : arg.substr(8);
-      p2_v_cap = std::max(0, std::atoi(s.c_str()));
+      std::fprintf(stderr, "--v-cap is removed; use --bV\n");
+      return 2;
     }
     else if (arg == "--v-trim" || arg.rfind("--v-trim=", 0) == 0) {
       const std::string s = arg == "--v-trim" ? next() : arg.substr(9);
@@ -21072,12 +21103,10 @@ int main(int argc, char** argv) {
     }
   }
 
-  // --pk-l2r on defaults for the options not given: --l2r-spawn inc --l2r-pbeam 1000,2000,2000
-  // --l2r-p3-hex on --l2r-p3-lin on --pr-ml-span 100000; with --grow-rec on (ml all/all)
-  // --grow-node-trunc 16 --grow-node-trunc-r -1; with --pr-fast (no --l2r-ctx / --l2r-p1 /
-  // --pr-partner-maxpairs / --pr-v-ratio) --pr-v-key xs; then --grow-r-from-v on if its
-  // requirements hold.  --grow-ml-ub on and --pr-v-mlk 0 are the defaults in every mode.
-  // --pk-l2r off / check keep the old defaults.
+  // --pk-l2r on defaults: --l2r-spawn inc; pbeam derived below as (b2,b4,b4) unless
+  // --l2r-pbeam / --pbeam-ratio given; --l2r-p3-hex/lin on; --pr-ml-span 100000; with
+  // --grow-rec on (ml all/all) --bG 16 --grow-node-trunc-r -1; --pr-v-key xs when safe;
+  // then --grow-r-from-v on if its requirements hold.
   if (pk_l2r == 1) {
     auto given = [&](const char* f) {
       for (int k = 1; k < argc; ++k)
@@ -21088,15 +21117,12 @@ int main(int argc, char** argv) {
       l2r_spawn_inc = true;
       l2r_spawn_cube = l2r_spawn_static = false;
     }
-    if (!given("--l2r-pbeam")) {
-      l2r_pbeam[0] = 1000;
-      l2r_pbeam[1] = l2r_pbeam[2] = 2000;
-    }
+    // pbeam filled after b2/b4 are known (see below).
     if (!given("--l2r-p3-hex")) l2r_p3_hex = true;
     if (!given("--l2r-p3-lin")) l2r_p3_lin = true;
     if (!given("--pr-ml-span")) pr_ml_span = 100000;
     const bool grow_ok = g_grow_rec && g_ml_L == 2 && g_ml_R == 2 && !g_ml_diag && !g_rec_check;
-    if (grow_ok && !given("--grow-node-trunc")) g_ntr_K = 16;
+    if (grow_ok && !given("--bG")) g_ntr_K = 16;
     if (p2_g_cap > 0) g_ntr_K = p2_g_cap;
     if (grow_ok && !given("--grow-node-trunc-r")) g_ntr_KR = -1;
     if (!given("--pr-v-key") && pr_fast > 0 && !l2r_ctx && !l2r_ctx_p1 && l2r_p1 == 0 && pr_pmax == 0 &&
@@ -21106,7 +21132,7 @@ int main(int argc, char** argv) {
       if (g_ntr_K > 0 && g_ntr_KR < 0 && pr_vxs && pr_fast >= 2 && !l2r_ctx_p1 && !l2r_diag)
         g_rfv = true;
       else
-        std::fprintf(stderr, "[defaults] --grow-r-from-v left off: needs --grow-node-trunc K > 0, "
+        std::fprintf(stderr, "[defaults] --grow-r-from-v left off: needs --bG K > 0, "
                              "--grow-node-trunc-r -1, --pr-v-key xs, --pr-fast ml\n");
     }
   }
@@ -21123,13 +21149,16 @@ int main(int argc, char** argv) {
       if (table_beam[t] < 0) table_beam[t] = 200;
   }
   b2_width = table_beam[BT_QM] >= 0 ? table_beam[BT_QM] : 200;
-  // P1(a, t) is two-index, so it takes b2. P2 and P3 stay at 2 x b4 unless the
-  // command line set --l2r-pbeam or --pbeam-ratio itself.
-  if (!user_pbeam && !user_pratio) l2r_pbeam[0] = b2_width;
-  // P2 is three indices and P3 is four, so both take b4 on the simplified grammar.
-  if (grammar_simple && !user_pbeam && !user_pratio && beam > 0) {
+  // pbeam = (b2, b4, b4) unless --l2r-pbeam or --pbeam-ratio was set.
+  if (!user_pbeam && !user_pratio) {
+    l2r_pbeam[0] = b2_width;
     l2r_pbeam[1] = beam;
     l2r_pbeam[2] = beam;
+  }
+  // --bV default 256 (replaces --v-cap / --pr-v-cap; 0 = uncapped).
+  if (!bV_set) {
+    pr_vcap = 256;
+    p2_v_cap = 256;
   }
   std::fprintf(stderr, "[arity] b2 %d b4 %d pbeam %d,%d,%d\n", b2_width, beam, l2r_pbeam[0],
                l2r_pbeam[1], l2r_pbeam[2]);
@@ -21281,7 +21310,7 @@ int main(int argc, char** argv) {
   }
   if (g_ntr_K < 0 || (g_ntr_K > 0 && (!g_grow_rec || pk_l2r != 1 || g_ml_L != 2 || g_ml_R != 2 ||
                                       g_ml_diag || g_rec_check))) {
-    std::fprintf(stderr, "--grow-node-trunc K >= 0 needs --grow-rec on, --pk-l2r on, ml all/all, "
+    std::fprintf(stderr, "--bG K >= 0 needs --grow-rec on, --pk-l2r on, ml all/all, "
                          "no --grow-ml-diag / --grow-rec-check\n");
     return 2;
   }
@@ -21292,7 +21321,7 @@ int main(int argc, char** argv) {
     return 2;
   }
   if (g_rfv && (g_ntr_K <= 0 || g_ntr_KR >= 0 || !pr_vxs || pr_fast < 2 || l2r_ctx_p1 || l2r_diag)) {
-    std::fprintf(stderr, "--grow-r-from-v on needs --grow-node-trunc K > 0, --grow-node-trunc-r -1, "
+    std::fprintf(stderr, "--grow-r-from-v on needs --bG K > 0, --grow-node-trunc-r -1, "
                          "--pr-v-key xs, --pr-fast ml; no --l2r-ctx p1 / --l2r-diag\n");
     return 2;
   }
@@ -21527,10 +21556,10 @@ int main(int argc, char** argv) {
       row(stage, "C", 1, "none", 0);
     };
     const int bV = p2_v_cap > 0 ? p2_v_cap : pr_vcap;
-    const char* bVsrc = p2_v_cap > 0 ? "b_V" : "pr_vcap";
-    std::fprintf(stderr, "[beams] n %d b1 %d b2 %d b4 %d bV %d bG %d rlt %d p %d,%d,%d lp_hk %d\n",
-                 n, nest_beam, b2_width, beam, bV, g_ntr_K, rlt ? rlt_beam : 0, l2r_pbeam[0],
-                 l2r_pbeam[1], l2r_pbeam[2], l2r_p_hk);
+    const char* bVsrc = "bV";
+    std::fprintf(stderr, "[beams] n %d b1 %d b2 %d b4 %d bV %d bG %d pbeam %d,%d,%d\n", n,
+                 nest_beam, b2_width, beam, bV, g_ntr_K, l2r_pbeam[0], l2r_pbeam[1],
+                 l2r_pbeam[2]);
     if (stem_rank) nest_tables("stem", nest_beam);
     if (stem_pr) {
       nest_tables("pass1", pre_beam > 0 ? pre_beam : nest_beam);
