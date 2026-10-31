@@ -43,17 +43,31 @@ at `6e8e3dc`. All four harness cases bit-identical (b4: V pairs, G states, G laz
 Which step carries it, each against the same base binary, one run each, nothing else on the
 node:
 
-| case | base | 2 reads | 3 maps | merged |
+| case | base | 2 reads | 3 maps (two runs) | merged |
 | --- | --- | --- | --- | --- |
-| RP150 lazy | 27.46 | 27.50 | 24.77 | 24.00 |
-| RP150 states | 38.12 | 38.12 | 35.44 | 34.95 |
-| Ther lazy | 168.95 | 169.30 | (not re-run) | 152.05 |
+| RP150 lazy | 27.46 | 27.50 | 24.77 / 25.67 | 24.00 |
+| RP150 states | 38.12 | 38.12 | 35.44 / 37.78 | 34.95 |
+| Ther lazy | 168.95 | 169.30 | 169.88 | 152.05 |
 
-The maps carry the result on their own (within a couple of percent of the merged binary) and the
-reads step measures zero: `mu_at` did one pair lookup and one entry lookup where the old code
-did two of each, on maps that are small and hot (4045 pairs, 170,414 entries at n=150), and the
-saving does not show up. It stays because it is shorter and exact, not because it pays. Whether
-GCC had already commoned the repeated inlined lookups is not verified from the assembly.
+The maps carry the result on their own (within the run-to-run spread of the merged binary, which
+is single runs for Ther) and the reads step measures zero: `mu_at` did one pair lookup and one
+entry lookup where the old code did two of each, on maps that are small and hot (4045 pairs,
+170,414 entries at n=150), and the saving does not show up. It stays because it is shorter and
+exact, not because it pays. Whether GCC had already commoned the repeated inlined lookups is not
+verified from the assembly.
+
+The single-run spread is real: the same maps-only binary measured 24.77 and 25.67 s on RP150
+lazy and 35.44 and 37.78 s on RP150 states, i.e. up to 3.6 % apart run to run on a shared login
+node. The usable conclusions are the interleaved base-versus-merged table above and the neutral
+reads step, not the second decimal of any single run.
+
+Ther is open: the maps-only binary measured 171.97 and 169.88 s there (two runs at different
+times), which is base level (168.95-185.20), not the merged 152.05, and reads-only measured
+169.30. The login node carried other long jobs throughout (three foreign dp03 processes at
+99 % CPU while these runs were made), so a single Ther run is not comparable across hours and
+the Ther attribution needs an interleaved A/B of each step binary, which this pass did not do.
+The interleaved base-versus-merged pair on Ther (168.95 against 152.05, run back to back) is the
+only Ther number to trust.
 
 Steps 1 and 4 were measured in the earlier single-run series, against its own base
 (29.59 / 42.55 / 185.20 s):
@@ -93,13 +107,14 @@ interleaved ones above but the absolute seconds are not comparable.
 - What the instrumented binary says for RP150 lazy (`[fine]` line, seconds of CPU at n=150):
   pass 2 growth 1.39, pass 2 select 0.00, pass 2 static 0.26, pass 3 nested tables (qb 0.13,
   qm 0.06, branch 0.04, qz 0.11, c 0.06, init 0.28), **reads K 5.06**, reads key 0.67,
-  outside 0.00, bpp 0.03. Pass 2 is 1.7 s of 29.6 s and the named pass-3 sub-stages are
-  0.7 s, so the two places to look next were the read paths and the pass-3 state tables,
-  which is what steps 2 and 3 did.
+  outside 0.00, bpp 0.03. Pass 2 and its sub-clocks come to about 1.7 s of 29.6 s, and the named
+  pass-3 sub-stages to 0.7 s, so neither the sweep nor `outside()`/`bpp()` is where the time is;
+  the two places to look were the read paths and the pass-3 state tables, which is what steps 2
+  and 3 did.
 - Open: the `[stage]` lines account for 21.9 s of the 29.6 s user time at RP150 lazy. About
   7.7 s is not attributed to any stage yet (not the sweep, not `outside()`, not `bpp()`).
 
-## 2. Reads: one `prMu` lookup per read instead of three (`e80753f`)
+## 2. Reads: one pair lookup and one entry lookup per read (`e80753f`)
 
 - `mu_at(x, y, xs)` returned `prMu[key2(x,y)][key2(xs,0)]` and first called `v_map_kind`,
   which itself looked up `prMu[key2(x, y)]` and then `[key2(xs, 0)]` to decide the kind. That is
@@ -177,7 +192,19 @@ transcendental-heavy kernel is one day found, batching is the way to attack it; 
 here points at one, so the first move is to attribute that 7.7 s.
 
 
-## 6. Reproduce
+## 6. Not covered
+
+- Ther 1-349 is the largest sequence any step was verified on. The HXB2 1-1000 run from the plan
+  was not made: at the paper preset the 349-mer takes 2.5 minutes and 1.5 GB, and n=1000 has not
+  been timed with these beams in this pass, so there is no baseline to compare against. The
+  identity checks (`tests/identity_check.sh`, uncapped `bV`/`bG`) cover the exact paths.
+- `FastMap` was applied to four maps only. The other `std::unordered_map`s (the stem-estimate
+  tables, `prMu` itself, the beam maps in `rank_prune.hpp`) were left alone, so there is room
+  left in the same direction.
+- Nothing was pushed: the work is on `perf/merged` (and the four step branches) in the local
+  clone only.
+
+## 7. Reproduce
 
 ```
 # base and merged binaries
