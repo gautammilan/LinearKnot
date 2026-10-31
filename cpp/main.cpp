@@ -86,6 +86,8 @@
 // stdout per sequence: [>id] / logZ / sec / pairs K / K lines "i j p" (1-based).
 
 #include "common/globals.hpp"
+// Third-party header, so at global scope: fast_map.hpp opens ankerl::unordered_dense.
+#include "common/fast_map.hpp"
 namespace {
 #include "common/logspace.hpp"
 #include "energy/parameters.hpp"

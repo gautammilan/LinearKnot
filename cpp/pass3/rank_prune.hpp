@@ -512,7 +512,7 @@
       if (keep[off + r]) ents.push_back(g.ents[r]);
     ents.shrink_to_fit();
     g.ents.swap(ents);
-    std::unordered_map<uint64_t, int> idx;
+    FastMap<uint64_t, int> idx;
     idx.reserve(g.ents.size());
     for (int r = 0; r < static_cast<int>(g.ents.size()); ++r)
       idx.emplace(key2(g.ents[r].p, g.ents[r].u), r);
