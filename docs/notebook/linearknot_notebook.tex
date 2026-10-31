@@ -9,60 +9,104 @@
 \usepackage{amsmath,amssymb}
 \usepackage{enumitem}
 \hypersetup{colorlinks=true,linkcolor=black,urlcolor=black,citecolor=black}
+% Long file paths and flags in \texttt: let lines stretch instead of running into the margin.
+\sloppy
+\setlength{\emergencystretch}{3em}
 % Gaps we have not verified from a file, log, commit, or command output.
 \newcommand{\tofill}[1]{\textcolor{red}{\textbf{[tofill: #1]}}}
 \title{LinearKnot project notebook}
 \author{Milan Gautam and collaborators}
-\date{Version 1.3 \quad 2026-10-29}
+\date{Version 1.4 \quad 2026-10-30}
 \begin{document}
 \maketitle
 
 \section*{Changelog}
 \begin{itemize}[leftmargin=*]
-  \item \textbf{1.3} (2026-10-29). Folded F floor+\texttt{--k-exact} and Pseu~(a) numbers; launched D (16-seq fixed sweep) and C (HXB2 cost) with \texttt{dp03\_fixlam\_sweep}@\texttt{ca8cd5e}.
+  \item \textbf{1.4} (2026-10-30). Branch \texttt{LinearPass2} at \texttt{f90c40a}. Added the Algorithm section (passes 1 to 3, the states sweep, the cuts, the identity). Logged H (lazy vs linear at \texttt{ca8cd5e}, per pass), I (G through the multiloop states: identity, Ther $b_G$ ladder, five-sequence matrix, new default $b_G=256$), J (unity-build split and dead-code pass, values unchanged). Updated status, paper setting, beams and flags (new flag names), binaries, reference provenance, open questions and next steps.
+  \item \textbf{1.3} (2026-10-29). Folded F floor+\texttt{-{}-k-exact} and Pseu~(a) numbers; launched D (16-seq fixed sweep) and C (HXB2 cost) with \texttt{dp03\_fixlam\_sweep}@\texttt{ca8cd5e}.
   \item \textbf{1.2} (2026-10-29). Cursor Task~N: authored notebook on \texttt{fix-lambda}, filled gaps from repo and \texttt{/tmp/new\_exactness}, added F ladders and floor, wrote Q1 with evidence search outcome. Commit of this PDF follows the build.
   \item \textbf{1.1}. Claude draft skeleton with red \texttt{\textbackslash tofill} markers (source was not on disk in the Cursor workspace; this file replaces it).
 \end{itemize}
 
 \section{Status}
-Branch \texttt{fix-lambda}. Sweep L-truncation fix is committed as \texttt{ca8cd5e} (q'-aware intermediate \texttt{cap\_ga}, \texttt{ntr\_init} before \texttt{sw\_fill}, default \texttt{--sweep on}). Exactness workstream A--F complete under \texttt{/tmp/new\_exactness}; campaigns D (16-seq fixed-sweep validation) and C (HXB2 pass-2 cost) relaunched 2026-10-29 with binary \texttt{/tmp/new\_exactness/bin/dp03\_fixlam\_sweep} (prior partial D/C used a pre-fix binary or left empty outs).
+Branch \texttt{LinearPass2} (a worktree of \texttt{LinearNupack}), head \texttt{f90c40a} (2026-10-30 20:14), pushed to \texttt{git@github.com:gautammilan/LinearKnot.git}, where \texttt{LinearPass2} is now the default branch; tags \texttt{paper-v1} (\texttt{7c4148d}, the code of the paper runs) and \texttt{paper-v1-build} (\texttt{b0987a9}, the same code plus two untracked headers, which builds the paper binary byte for byte) are pushed too. On 2026-10-30 we made G through the multiloop states the default with $b_G=256$ (experiment I), split the 23{,}820-line source into a unity build of about 50 files (J), and deleted the code that no coverage run executes, with 182 options (J). Campaign D (16 sequences, fixed sweep) finished; campaign C (HXB2 pass-2 cost) gave numbers only at $n=1000$ to $3000$ (H). The HXB2 1--3000 coverage run was killed for memory, so the dead-code pass has not been checked on long sequences.
 
 \section{Paper setting (current default path)}
-Unless an experiment says otherwise, the paper-facing linear pass-2 command is the expanded \texttt{--preset default} block in \texttt{cpp/dp03\_l2r\_merged.cpp} (energy model separate), plus the post-\texttt{ca8cd5e} defaults \texttt{--sweep on} and \texttt{--v-sweep on}. Material for the tmRNA campaigns: \texttt{--material rna1999 --dangles some} with \texttt{dp03/params/rna1999.dG}.
+The paper command is \texttt{dp03 -{}-preset accurate -{}-material rna1999 -{}-dangles some -{}-param-file dp03/params/rna1999.dG} with the binary built by \texttt{make} (\texttt{build/dp03}). The preset sets $b_1=200$, $b_2=1000$, $b_4=3000$, $b_V=256$, $b_G=256$, P beams $(b_2,b_4,b_4)=(1000,3000,3000)$, G through the multiloop states (\texttt{-{}-g-sweep states}, the built-in default), \texttt{-{}-sweep on -{}-v-sweep on}, \texttt{-{}-loop-cap 30 -{}-max-loop 30 -{}-ml-lead-cap 30}, $RT=0.6163207755$, and the stem-estimate and scan options listed in \texttt{cpp/main.cpp}. The energy model is not part of the preset. \texttt{-{}-preset default} is the same with $b_2=200$, $b_4=1000$, $b_V=512$, $b_G=16$. Experiments before 2026-10-30 (G\_hex to F, H) used older presets and flag names; each entry states its flags.
+
+\section{Algorithm (current default path)}
+Source: the code at \texttt{f90c40a} (\texttt{cpp/pass1/}, \texttt{cpp/pass2/g\_states.hpp}, \texttt{cpp/pass2/sweep.hpp}, \texttt{cpp/pass3/}), \texttt{docs/ARCHITECTURE.md}, \texttt{LINEAR\_PASS2\_SWEEP.md}, and the equations of \texttt{docs/LinearNupack\_math.tex} in the main checkout (cited below as M with its labels).
+
+\paragraph{Symbols.} The sequence is $x_0\dots x_{n-1}$ (0-based, $n$ its length). A pair $i\cdot j$ has $i<j$. $Z$ is the DP03 partition function with pseudoknots (Dirks and Pierce 2003, NUPACK rna1999 parameters, dangles ``some''), $\log Z$ its natural log, and every weight is a Boltzmann factor at $RT=0.6163207755$\,kcal/mol. $\mathrm{at}(i,j)$ is the weight a pair gets as the end of a helix in the exterior loop (terminal AU/GU penalty and dangles), defined when both ends may be terminal (\texttt{end\_ok}). $L=30$ is the loop cap (largest interior-loop gap per side). The beams are $b_1$ (pass~1), $b_2$ (two-index columns and $Q^z$), $b_V$ and $b_G$ (pass-2 maps) and $b_4$ (four-index scan states); a width of 0 keeps every state.
+
+\paragraph{Shape.} Three passes run in order. Passes 1 and 2 build tables that only rank states; pass 3 is the only pass that adds to $Z$. With every beam infinite the scan is exact DP03 (the ranking then decides nothing).
+
+\subsection*{Pass 1: nested pre-pass (beam $b_1$)}
+The pseudoknot-free DP03 grammar with the same energy model runs inside over right ends $j=0,\dots,n-1$. Its tables are $Q^b(i,j)$ ($i\cdot j$ paired), $Q^m(i,j)$ (a multiloop interior with at least one branch), $Q^{m2}(i,j)$ (at least two branches; a closing pair reads this one) and $C(j)$, the exterior inside on $[0,j]$. At each $j$ we keep, separately for $Q^b$, $Q^m$ and $Q^{m2}$, the $b_1$ starts $i$ with the largest $C(i-1)\,Q(i,j)$ (the prefix key); a dropped start is never read again. From the kept tables: $C_{\mathrm{pre}}=C$; the suffix weight $\bar S_{\mathrm{pre}}(y)=\bar S_{\mathrm{pre}}(y+1)+\sum_{j>y}Q^b(y,j)\,\mathrm{at}(y,j)\,\bar S_{\mathrm{pre}}(j+1)$ with $\bar S_{\mathrm{pre}}(n)=1$ (M eq:prS); the nested outside weight $\beta^b(x,y)$ of every kept pair; and $\bar M=Q^m$. On an exact pass~1, $\bar S_{\mathrm{pre}}$ is the exterior outside; under the beam it is the suffix of the kept inside. Cost: 1.3\,s CPU at $n=486$ (experiment I).
+
+\subsection*{Pass 2: ranking tables (beams $b_2$, $b_V$, $b_G$)}
+\begin{enumerate}[leftmargin=*]
+\item \textbf{Gap partition function.} $Q^z_{\mathrm{pre}}(k,j)$, the nested weight of a gap $[k,j]$; at each $j$ we keep the $b_2$ starts $k$ with the largest $C(k-1)\,Q^z(k,j)$.
+\item \textbf{The states sweep} (\texttt{sw\_hyper\_push}, \texttt{-{}-g-sweep states}). One right-to-left pass over the kept pass-1 states, columns $j=n-1,\dots,0$. Each kept state $s$, which is a $Q^m(i,j)$, a $Q^{m2}(i,j)$ or a pair $i\cdot j$, carries two sparse maps: $G_s$ indexed by a pair $(p',q')$ and $V_s$ indexed by a left end $b$. For every pass-1 hyperedge that builds a parent $s$ from a child $c$, the child receives $s$'s maps times the edge weight times the inside weight of the other children. The edges, in the names the binary logs, are: E1 and E2, one unpaired base extending $Q^m$ or $Q^{m2}$; E3, an interior loop (both gaps $\le L$) from an outer pair onto an inner pair; E5 to E8, a multiloop branch $d\cdot j$ (the parent $Q^m(i,j)$ or $Q^{m2}(i,j)$ pushes to the branch pair and to the $Q^m(i,d-1)$ on its left; E5 is the branch with nothing on its left); E9, a closing pair into the nested multiloop table (with E3 multi and E4 multi-ext inside it). At a pair $x\cdot y$ with \texttt{end\_ok} the sweep also adds the stop terms
+\[
+G_{x\cdot y}[x,y]\mathrel{+}=\mathrm{at}(x,y),\qquad V_{x\cdot y}[x]\mathrel{+}=\mathrm{at}(x,y)\,\bar S_{\mathrm{pre}}(y+1).
+\]
+Because every parent of a state ends at or right of the state's right end, a state's maps are complete when its column is reached. Then, before it pushes, $G_s$ is cut to its $b_G$ entries with the largest $C_{\mathrm{pre}}(p'-1)\,G_s[p',q']\,\bar S_{\mathrm{pre}}(q'+1)$, and $V_s$ to its $b_V$ entries with the largest $C_{\mathrm{pre}}(b-1)\,V_s[b]$. $Q^m$ and $Q^{m2}$ maps are freed after their column; pair maps are kept and become $G(x,y)$ and $V(x,y)$.
+\item \textbf{What the maps mean (identity).} $G(x,y)$ splits the nested outside of the pair $x\cdot y$ by the outermost exterior-loop pair $p'\cdot q'$ around it, and $V(x,y)$ splits it by the left end $b$:
+\[
+\sum_{p',q'}C_{\mathrm{pre}}(p'-1)\,G(x,y)[p',q']\,\bar S_{\mathrm{pre}}(q'+1)=\beta^b(x,y),\qquad
+\sum_{b}C_{\mathrm{pre}}(b-1)\,V(x,y)[b]=\beta^b(x,y).
+\]
+With $b_V$ and $b_G$ uncapped on RNase~P \emph{D.~radiodurans} 1--150 both hold on all 2948 pairs with \texttt{end\_ok} to maximum relative error $7.816\times10^{-13}$ ($V$) and $7.390\times10^{-13}$ ($G$); \texttt{make check} runs this and fails above $10^{-9}$ (experiment I).
+\item \textbf{Arms.} The arm weights the scan reads ($K_L$, \texttt{lK}) are sums over the stored $V$ entries times the pseudoknot suffix $\bar S_{\mathrm{pk}}$ (M eq:pra, eq:prK; \texttt{cpp/pass2/arms.hpp}).
+\end{enumerate}
+
+\subsection*{Pass 3: left-to-right scan (beams $b_2$, $b_4$, P beams)}
+For $j=0,\dots,n-1$ the LR-DP03 inside (\texttt{-{}-pk-l2r on}) computes every cell that ends at $j$: the nested columns $Q^b,Q^m,Q^{m2},Q^p,Q^{mp}$ and $Q^z$ (beam $b_2$), the four-index pseudoknot states $Q^g,Q^{gl},Q^{gr},Q^{gls},Q^{grs}$ (beam $b_4$, one beam per step over all gaps) and the partial states $P_1,P_2,P_3$ (beams $b_2,b_4,b_4$). Each four-index state $X$ with inside weight $\alpha_X$ is ranked by $\sigma(X)=\log\alpha_X+\log\hat O(X)$, where $\hat O$ estimates its outside (M sec:prscore, eq:prO). The growth part of $\hat O$ for a state whose stem has outer pair $x\cdot y$ reads $G(x,y)$ (\texttt{sw\_as\_rn}): every entry is multiplied by the scan's own exterior prefix $\hat C(p'-1)$, the entries are summed over $p'$ for each $q'$, and the $b_G$ right ends $q'$ with the largest $\hat G(q')\,u_L(q')$ are kept, where $u_L$ is the arm weight of the stop term. Keys on the right side read $V$ (\texttt{-{}-grow-r-from-v on}). The $b_4$ states with the largest $\sigma$ survive each step. At the end $\log Z=\log C(n-1)$; pair probabilities come from the scan's outside pass.
+
+\paragraph{Where the time goes.} At the paper preset on Ther ($n=349$): pass~1 0.6\,s, pass~2 213\,s (the states sweep 210\,s, of which the G merge and cut 165\,s), pass~3 167\,s (state scoring 104\,s, table building 57\,s, growth reads 4\,s). Experiments H and I give the numbers for other settings.
 
 \section{Beams and flags}
-Source for names, pruned tables, and unset defaults: file-header comments and CLI parsing in \texttt{cpp/dp03\_l2r\_merged.cpp} (read 2026-10-29 on \texttt{fix-lambda}).
+Source: \texttt{cpp/main.cpp} (preset), \texttt{cpp/cli/options.hpp}, \texttt{cpp/cli/parse\_args.hpp}, \texttt{cpp/cli/defaults\_validate.hpp} at \texttt{f90c40a}.
 
 \begin{center}
-\begin{tabular}{@{}llp{0.42\textwidth}l@{}}
+\footnotesize
+\begin{tabular}{@{}lp{0.2\textwidth}p{0.42\textwidth}p{0.1\textwidth}l@{}}
 \toprule
-Short & Flag & Tables / role & Unset default \\
+Beam & Flag & Tables & Unset & \texttt{accurate} \\
 \midrule
-b1 & \texttt{--b1 N} (= \texttt{--nest-beam}) & Nested pre-pass and stem-estimate length beam & 200; \texttt{0} keeps every state \\
-b2 & \texttt{--b2 N} & Scan two-index columns Qb, Qm, Qm2, Qp, Qmp, and $Q^z$ / $Q^z_{\mathrm{pre}}$ via beam-table writes & 200 \\
-b4 & \texttt{--beam B} & Four-index / primary scan beam; also seeds pbeam when ratio unset & 1000 (\texttt{--preset default}), 3000 (\texttt{accurate}) \\
-bV & \texttt{--pr-v-cap N} & Cap on pass-2 $V$ key lists (xs-keyed) & 0 (none) in raw CLI; preset writes 512 \\
-bG & \texttt{--grow-node-trunc K} & Top-$K$ on growth node / root / key $L$ (and $R$ unless KR overrides) & 16 under \texttt{--pk-l2r} grow defaults \\
-pbeam & \texttt{--l2r-pbeam} $b_1,b_2,b_3$ & Pass-2 $P1,P2,P3$ beams & preset default \texttt{1000,2000,2000}; accurate \texttt{3000,6000,6000}; else P1 follows b2 \\
-& \texttt{--grow-node-trunc-r KR} & $R$-side $K$ (\texttt{-1}: dense, no $R$ trunc) & \texttt{-1} under grow defaults \\
-& \texttt{--ml-lead-cap N} & Multiloop leading-run cap & \tofill{unset numeric default in CLI when flag absent} \\
-& \texttt{--sweep on|off} & Pass-2 $\Lambda$ via \texttt{sw\_as\_rn}/\texttt{sw\_fill} vs lazy \texttt{rec\_node} & on after \texttt{ca8cd5e} \\
-& \texttt{--v-sweep on|off} & $V$ sweep path & on after \texttt{ca8cd5e} \\
-& \texttt{--k-exact} & Exact $K$ (sets \texttt{sx\_k\_exact}) & off \\
+$b_1$ & \texttt{-{}-b1 N} & Pass-1 $Q^b,Q^m,Q^{m2}$ (and the stem-estimate run) & 200 & 200 \\
+$b_2$ & \texttt{-{}-b2 N} & Scan $Q^b,Q^m,Q^{m2},Q^p,Q^{mp}$; $Q^z$, $Q^z_{\mathrm{pre}}$; $P_1$ & 200 & 1000 \\
+$b_4$ & \texttt{-{}-b4 N} & Scan four-index states and \texttt{PKM}; $P_2$, $P_3$ & 0 (no beam) & 3000 \\
+$b_V$ & \texttt{-{}-bV N} & Pass-2 $V$ maps (entries per pair) & 256 & 256 \\
+$b_G$ & \texttt{-{}-bG N} & Pass-2 $G$ maps (entries per state); $q'$ kept per growth read & 16 (with \texttt{-{}-pk-l2r on}) & 256 \\
+P beams & derived & $(P_1,P_2,P_3)=(b_2,b_4,b_4)$ & & 1000,3000,3000 \\
+\midrule
+ & \texttt{-{}-g-sweep direct|states} & How $G$ is built: \texttt{states} = the states sweep of pass~2; \texttt{direct} = pair to pair through $\bar M$ (\texttt{sw\_fill}), filled at the scan's first growth read & states & states \\
+ & \texttt{-{}-sweep on|off} & Growth reads from the pass-2 maps; \texttt{off} = the lazy path (\texttt{rec\_root} builds each root on demand through \texttt{pr\_steps} and \texttt{rec\_node}; still in the code, not run since the dead-code pass) & on & on \\
+ & \texttt{-{}-v-sweep on|off} & Scan reads $V$ from the sweep & on & on \\
+ & \texttt{-{}-ml-lead-cap N} & Multiloop leading unpaired run cap & 30 & 30 \\
+ & \texttt{-{}-out-id}, \texttt{-{}-g-trace} & Identity check; pair traces (diagnostics kept) & off & off \\
 \bottomrule
 \end{tabular}
 \end{center}
 
+Flags renamed or removed on 2026-10-30 (entries before that date use the old names): \texttt{-{}-nest-beam} became \texttt{-{}-b1}, \texttt{-{}-beam} became \texttt{-{}-b4}, \texttt{-{}-pr-v-cap} became \texttt{-{}-bV}, \texttt{-{}-grow-node-trunc} became \texttt{-{}-bG}; \texttt{-{}-l2r-pbeam} is derived; \texttt{-{}-g-cut}, \texttt{-{}-k-exact}, \texttt{-{}-pre-beam} and 179 other options were removed (\texttt{docs/UNUSED\_CODE.md}). The run report still prints \texttt{g\_cut topq} as a fixed string; it does not describe the states path.
+
 Here $Z$ is the partition function and $\log Z$ is its natural log as printed by the binary. $|d\log Z|$ means absolute deviation from a stated reference $\log Z$.
 
 \section{Binaries}
+All built with \texttt{g++ -O3 -std=c++17 -ffp-contract=off -Wall -Wextra} (no fast-math, no FMA contraction).
 \begin{itemize}[leftmargin=*]
-  \item \textbf{NEW (fixed sweep).} \texttt{/tmp/new\_exactness/bin/dp03\_fixlam\_sweep}, built 2026-10-29 17:41 from \texttt{cpp/dp03\_l2r\_merged.cpp} at \texttt{ca8cd5e} (NFS \texttt{cpp/dp03\_cpp\_l2r\_merged\_fixlam} was root-owned and not overwritten).
+  \item \textbf{CURRENT.} \texttt{build/dp03} from \texttt{make} at \texttt{f90c40a}, md5 \texttt{018486b58c2469133a1b53d12d23f355}, the same md5 as the dead-code check binary \texttt{/tmp/lp2/chk/dp03\_final3}.
+  \item \textbf{PAPER (states, $b_G=256$).} \texttt{/tmp/new\_exactness/bin/dp03\_g256} and \texttt{dp03\_default} (same file), md5 \texttt{48d4b172c657d3825eef86d7a31b5793}, built 2026-10-30 14:09 from \texttt{7c4148d} (tag \texttt{paper-v1}); a clean checkout of tag \texttt{paper-v1-build} rebuilds this md5.
+  \item \textbf{LAZY (G4 part A).} \texttt{LinearNupack/cpp/dp03\_cpp\_l2r\_merged\_fixlam}, md5 \texttt{6f7e4f516e57b48b129fc569cba506bc}, mtime 2026-10-29 14:51, one minute after commit \texttt{e53f948} (default \texttt{-{}-sweep off}). Build commit: \tofill{not recorded next to the binary}.
+  \item \textbf{NEW (fixed sweep).} \texttt{/tmp/new\_exactness/bin/dp03\_fixlam\_sweep}, built 2026-10-29 17:41 from \texttt{cpp/dp03\_l2r\_merged.cpp} at \texttt{ca8cd5e} (NFS \texttt{cpp/dp03\_cpp\_l2r\_merged\_fixlam} was root-owned and not overwritten). md5 \texttt{335a5e6c736140eba6a5e0ba71e6fe14}, the same file as \texttt{/tmp/new\_exactness/G4/bin/dp03\_fixsw} used by G4 part D.
   \item \textbf{OLD (hard14).} \texttt{stemest/l2r\_incperf/hard14/bin/dp03\_cpp\_l2r\_incperf\_st}, mtime 2026-10-08 09:26. Commit hash for that binary: \tofill{no COMMIT/README next to the binary; git history does not name the hard14 build commit}.
 \end{itemize}
 
 \section{Sixteen-sequence exactness set}
-Lengths and NUPACK $\log Z$ references as stored in \texttt{/tmp/new\_exactness/G4/dumps/A/rmsd\_accurate\_sweep\_off.tsv} (and \texttt{F/refs.tsv} for the F subset).
+Lengths and NUPACK $\log Z$ references as stored in \texttt{/tmp/new\_exactness/G4/dumps/A/}\allowbreak\texttt{rmsd\_accurate\_sweep\_off.tsv} (and \texttt{F/refs.tsv} for the F subset).
 
 \begin{center}
 \begin{tabular}{@{}clc@{}}
@@ -90,10 +134,16 @@ tmRNA\_Lept.spec.\_TRW-261385\_1-359 & 359 & 245.7437570575795 \\
 \end{center}
 
 \section{DP03 / NUPACK reference $\log Z$}
-The tmRNA $|d\log Z|$ numbers in G4/E/F compare against the \texttt{ref\_logZ} column above (treated as NUPACK in experiment reports). Exact producer of those reference values: \tofill{which NUPACK/DP03 binary and full flag line wrote ref\_logZ}. Whether that reference used multiloop leading-run cap 30: \tofill{not stated next to the TSV}. The linear pipeline does expose \texttt{--ml-lead-cap}; paper preset expansion in source does not insert it, while linp2 default experiments pass \texttt{--ml-lead-cap 30}.
+The tmRNA $|d\log Z|$ numbers in G4/E/F compare against the \texttt{ref\_logZ} column above (treated as NUPACK in experiment reports). Provenance, from \texttt{tasks/2026-10-30-dead-code-and-refs.md} (evidence in \texttt{/tmp/lp2/exactref/provenance.md}):
+\begin{itemize}[leftmargin=*]
+  \item \textbf{The 16 ArchiveII sequences} (RNase~P \emph{M.~maripaludus} and 15 tmRNA): NUPACK 3.0.6 with a local patch \texttt{-DDP03\_MAXLOOP=30}, binary \texttt{Algorithm/nupack3.0.6-dp03cap/bin/pairs}, md5 \texttt{ceddfd2cf8c3c2c2a186e41ab1fbfeb1}, command \texttt{pairs -material rna1999 -dangles some -pseudo -T 37 -validate <id>}, $\log Z=-\Delta G/0.6163207755$. The patch caps interior and bulge loops only, so these references have no multiloop leading-run cap. The NUPACK tree is not under git.
+  \item \textbf{RNase~P \emph{D.~radiodurans} 1--150}: \texttt{LinearNupack/cpp/dp03\_cpp\_stem} (md5 \texttt{1096a4999fee4280596500a0b5104e41}) with \texttt{-{}-beam inf}, built from the untracked \texttt{cpp/dp03.cpp}; no leading-run cap.
+  \item \textbf{RNase~P \emph{D.~radiodurans} 486\,nt}: \texttt{dp03\_cpp -{}-beam 0} as built on 2026-10-01 (since overwritten, md5 unknown); no leading-run cap.
+\end{itemize}
+None of these binaries maps to a commit, so no \texttt{exact-ref} tag exists. The paper preset passes \texttt{-{}-ml-lead-cap 30} (also the built-in default at \texttt{f90c40a}), so the linear runs and the references differ in that cap.
 
 \section{DP03 timing / $n^{5.8}$ fit}
-We found timing runs under \texttt{scaling\_step/} (compact binary \texttt{./dp03\_compact --beam 100 --gap-beam step --cutoff 1e-6}):
+We found timing runs under \texttt{scaling\_step/} (compact binary \texttt{./dp03\_compact -{}-beam 100 -{}-gap-beam step -{}-cutoff 1e-6}):
 
 \begin{center}
 \begin{tabular}{@{}rrr@{}}
@@ -116,7 +166,7 @@ Whether these are the runs used for the published $n^{5.8}$ fit: \tofill{no note
 \begin{itemize}[leftmargin=*]
   \item Question: P3 $t{=}35$ $H_{\mathrm{ex}}$ c1-term diagnosis on Ther $n{=}63$.
   \item Out: \texttt{/tmp/new\_exactness/G\_hex}. REPORT mtime 2026-10-29 11:17.
-  \item Flags: E\_ther63 OLD hard14 accurate + \texttt{--no-bpp}; NEW + \texttt{--b1 0 --param-file}. Diag copies only.
+  \item Flags: E\_ther63 OLD hard14 accurate + \texttt{-{}-no-bpp}; NEW + \texttt{-{}-b1 0 -{}-param-file}. Diag copies only.
   \item Commit/branch: \tofill{not recorded in G\_hex/REPORT.md}.
 \end{itemize}
 
@@ -145,14 +195,14 @@ Whether these are the runs used for the published $n^{5.8}$ fit: \tofill{no note
 \subsection{E (flag bracketing)}
 \begin{itemize}[leftmargin=*]
   \item Out: \texttt{/tmp/new\_exactness/E}, summary \texttt{REPORT\_sweep\_on.md} (2026-10-29 18:08).
-  \item Base (a): E\_ther63 flags with \texttt{--sweep on} (fixed binary), \texttt{--no-bpp}.
-  \item Ther $|d\log Z|$ at (a): 0.0649; Deha 1.626. Flags that move Ther by ${>}0.05$: \texttt{--beam}${\to}1000$ (+5.95), \texttt{--pr-v-cap}${\to}128$ (+5.64), \texttt{--b1}${\to}200$ (+0.080).
+  \item Base (a): E\_ther63 flags with \texttt{-{}-sweep on} (fixed binary), \texttt{-{}-no-bpp}.
+  \item Ther $|d\log Z|$ at (a): 0.0649; Deha 1.626. Flags that move Ther by ${>}0.05$: \texttt{-{}-beam}${\to}1000$ (+5.95), \texttt{-{}-pr-v-cap}${\to}128$ (+5.64), \texttt{-{}-b1}${\to}200$ (+0.080).
   \item OLD hard14 $|d\log Z|$: Deha 1.614, envi-1 1.063, Shew.frig 0.795, Pseu.aeru 0.248.
 \end{itemize}
 
 \subsection{F (beam ladders and floor)}
 \begin{itemize}[leftmargin=*]
-  \item Out: \texttt{/tmp/new\_exactness/F}. Binary \texttt{dp03\_fixlam\_sweep} @ \texttt{ca8cd5e}. Base = (a) with \texttt{--b1 200}, \texttt{--sweep on}, \texttt{--no-bpp}.
+  \item Out: \texttt{/tmp/new\_exactness/F}. Binary \texttt{dp03\_fixlam\_sweep} @ \texttt{ca8cd5e}. Base = (a) with \texttt{-{}-b1 200}, \texttt{-{}-sweep on}, \texttt{-{}-no-bpp}.
   \item Concurrency: ladder 20, floor 6 (cgroup memory max 300\,Gi, 96 CPUs).
 \end{itemize}
 
@@ -182,7 +232,7 @@ List.seel & 0.864/500/1844764 & 0.862/533/2057256 & 0.861/551/2269284 & 0.852/62
 $|d\log Z|$ identical for bV $\in\{128,256,512,1024\}$ on every sequence (dumps). Example walls at bV=512 match the b4=3000 column above.
 
 \paragraph{F.3 Floor.}
-Flags: b4=10000, bV=2048, pbeam=\texttt{6000,12000,12000}, bG=64, b1=0, \texttt{--sweep on}.
+Flags: b4=10000, bV=2048, pbeam=\texttt{6000,12000,12000}, bG=64, b1=0, \texttt{-{}-sweep on}.
 
 \begin{center}
 \begin{tabular}{@{}lrrrr@{}}
@@ -201,9 +251,9 @@ List.seel & 167.01972 & 0.83950 & 1421.0 & 5427596 \\
 \end{tabular}
 \end{center}
 
-Floor $|d\log Z|{>}0.3$: Deha, Shew.frig, List. Exact-K option \texttt{--k-exact} exists in CLI.
+Floor $|d\log Z|{>}0.3$: Deha, Shew.frig, List. Exact-K option \texttt{-{}-k-exact} exists in CLI.
 
-\paragraph{F.3b Floor + \texttt{--k-exact} (seqs with floor $|d|{>}0.3$).}
+\paragraph{F.3b Floor + \texttt{-{}-k-exact} (seqs with floor $|d|{>}0.3$).}
 From \texttt{F/REPORT.md} / dumps \texttt{3\_floor\_kx\_*} (finished 2026-10-29 21:33--21:44).
 
 \begin{center}
@@ -218,13 +268,116 @@ List.seel & 0.83845 & 1502.1 & 5608768 & $-0.00106$ \\
 \end{tabular}
 \end{center}
 
-\texttt{--k-exact} nearly closes Shew.frig and cuts Deha by ${\sim}0.25$; List is essentially unchanged.
+\texttt{-{}-k-exact} nearly closes Shew.frig and cuts Deha by ${\sim}0.25$; List is essentially unchanged.
 
 \paragraph{F.4 NEW at E-flags (a) on Pseu.aeru.}
-\texttt{--b1 0}, other (a) flags, sweep on, no bpp. Dump \texttt{4\_a\_pseu}: $|d\log Z|{=}0.25043$, wall 727.3\,s, RSS 2654296\,KB. OLD hard14 from E: $|d|{=}0.24821$. NEW matches OLD to ${\sim}0.002$ on this point.
+\texttt{-{}-b1 0}, other (a) flags, sweep on, no bpp. Dump \texttt{4\_a\_pseu}: $|d\log Z|{=}0.25043$, wall 727.3\,s, RSS 2654296\,KB. OLD hard14 from E: $|d|{=}0.24821$. NEW matches OLD to ${\sim}0.002$ on this point.
 
 \paragraph{F takeaway for D/C.}
-b4 moves $|d|$; bV flat in the tested range; floor still leaves Deha/List residuals; paper validation D stays on linp2 default/accurate with fixed sweep (same flags as A, \texttt{--sweep on}). C measures HXB2 pass-2 cost under those default flags, sweep off vs on.
+b4 moves $|d|$; bV flat in the tested range; floor still leaves Deha/List residuals; paper validation D stays on linp2 default/accurate with fixed sweep (same flags as A, \texttt{-{}-sweep on}). C measures HXB2 pass-2 cost under those default flags, sweep off vs on.
+
+\subsection{H (lazy vs linear growth at \texttt{ca8cd5e}, time per pass)}
+\begin{itemize}[leftmargin=*]
+  \item Question: what does the linear pass-2 G cost against the lazy growth, per pass, and does $\log Z$ move?
+  \item Out: \texttt{/tmp/new\_exactness/G4/dumps/A} (lazy) and \texttt{.../D} (linear), scripts \texttt{G4/scripts/run\_A.py}, \texttt{run\_D.py}; C: \texttt{G4/dumps/C/cost.tsv}. Branch \texttt{fix-lambda}.
+  \item Binaries: lazy = LAZY (\texttt{dp03\_cpp\_l2r\_merged\_fixlam}, flag \texttt{-{}-sweep off}); linear = \texttt{dp03\_fixsw} (\texttt{ca8cd5e}, flag \texttt{-{}-sweep on}). Two different builds; the lazy path is the code \texttt{ca8cd5e} did not touch.
+  \item Flags (both): \texttt{-{}-v-sweep on -{}-ml-lead-cap 30 -{}-b1 200}, bpp on, 16 sequences, \texttt{jobs=1} (A) and \texttt{jobs=16} (D). Beams from the \texttt{[beams]} lines: default $b_2=2000$, $b_4=1000$, $b_V=128$, $b_G=32$, P 1000,2000,2000; accurate the same with $b_4=3000$, P 1000,6000,6000.
+  \item Times are CPU seconds from the \texttt{[stage]} lines, summed over the 16 sequences. Pass~3 of the linear runs contains the G fill, because \texttt{sw\_fill} runs at the scan's first growth read.
+\end{itemize}
+
+Here $\Delta=|\log Z_{\mathrm{linear}}-\log Z_{\mathrm{lazy}}|$ per sequence; the table gives its mean and maximum.
+\begin{center}
+\small
+\begin{tabular}{@{}llrrrrl@{}}
+\toprule
+preset & growth & pass 1 & pass 2 & pass 3 & wall total & mean $\Delta$ \\
+\midrule
+default & lazy & 8.7 & 229.9 & 1220.5 & 1665 & \\
+default & linear & 8.7 & 255.5 & 17292.1 & 17878 & 0.0068 (max 0.035, Neph.oliv) \\
+accurate & lazy & 8.7 & 244.2 & 2775.3 & 3653 & \\
+accurate & linear & 8.8 & 262.4 & 23758.4 & 24824 & 0.0091 (max 0.115, envi-1) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Ther, accurate, from \texttt{[l2r-time]}: pass~3 143.6\,s lazy (growth 10.8\,s) and 1819.0\,s linear (growth 1689.0\,s); without growth both are about 130\,s. Peak RSS 1.6\,GB lazy, 3.5\,GB linear. Cause, from \texttt{growth\_read/step1\_summary.txt}: the \texttt{ca8cd5e} cap keeps the top $b_G$ right ends $q'$ and every $(p',q')$ entry of them, so a map holds about 950 entries (mean 947.5, max 2912) against 31.6 at \texttt{e53f948}, and \texttt{sw\_fill} took 1072.8\,s against 46.1\,s. Lazy nodes hold at most 32 entries (\texttt{node\_elems 28.9/32/32}). Mean $|d\log Z|$ against the references: accurate 0.633 lazy, 0.642 linear.
+
+HXB2 (C, default flags as above, wall seconds): $n=1000$ lazy 1155 (pass~2 156, scan 851, 3.4\,GB, $\log Z$ 616.64998) and linear 23057 (scan 22719, 31.2\,GB, 616.66003); $n=2000$ lazy 7037 (9.2\,GB, 1064.96172) and linear 81479 (scan 80399, 103.4\,GB, 1064.94063); $n=3000$ lazy 12736 (16.6\,GB, 1546.92920), linear no $\log Z$. All runs at $n\ge5000$ ended without a $\log Z$.
+
+Conclusion: at \texttt{ca8cd5e} the linear G gives the lazy $\log Z$ (mean difference below 0.01) but costs 10.7 times (default) and 6.8 times (accurate) the lazy wall time summed over the 16 sequences, and 20.0 times ($n=1000$) and 11.6 times ($n=2000$) on HXB2, almost all of it in the G fill. This motivated I.
+
+\subsection{I (G through the multiloop states; new default $b_G=256$)}
+\begin{itemize}[leftmargin=*]
+  \item Question: can G be built in pass~2 by pushing through the pass-1 states (as $V$ is), and at which $b_G$ does it keep the accuracy?
+  \item Record: \texttt{tasks/2026-10-30-growth-read.md}. Out: \texttt{/tmp/new\_exactness/growth\_read/} (\texttt{gsweep/matrix}, \texttt{ther\_diag}, \texttt{step2}). Branch \texttt{perf/growth-read}, then \texttt{LinearPass2}. Commits \texttt{6edb3ba} (add \texttt{-{}-g-sweep states}), \texttt{d5547dd} (\texttt{-{}-out-id}), \texttt{7c4148d} (states default, \texttt{accurate} writes \texttt{-{}-bG 256}).
+  \item Flags: \texttt{-{}-preset accurate -{}-material rna1999 -{}-dangles some -{}-param-file dp03/params/rna1999.dG}, plus \texttt{-{}-g-sweep states|direct}, \texttt{-{}-g-cut topq|entries} and \texttt{-{}-bG} as listed.
+\end{itemize}
+
+\paragraph{I.1 Identity.} RNase~P 1--150, $b_V=b_G=10^7$, \texttt{-{}-out-id}: $V$ 2948 pairs, maximum relative error $7.8\times10^{-13}$ (median $5.7\times10^{-14}$); G states 2948 pairs, $7.4\times10^{-13}$ (median $5.7\times10^{-14}$); G direct does not satisfy it (median 0.715), because it walks the pseudoknot-stem steps \texttt{pr\_steps} through $\bar M$, not the nested grammar. $\log Z$ uncut: direct 116.28133400511338, states 116.28132371946509.
+
+\paragraph{I.2 Ther $b_G$ ladder (states).} CPU seconds; exact $\log Z$ 327.54328498. Out \texttt{ther\_diag/*} and \texttt{gsweep/matrix/Ther}.
+
+\begin{center}
+\small
+\begin{tabular}{@{}lrrrrrrr@{}}
+\toprule
+setting & $\log Z$ & $d\log Z$ & pass 2 & G fill & pass 3 & total & RSS (GB) \\
+\midrule
+states $b_G=128$ & 314.78248426 & $-12.761$ & 128.9 & 89.6 & 136.8 & 308.1 & 1.48 \\
+states $b_G=256$ & 327.39766236 & $-0.146$ & 213.2 & 164.8 & 167.1 & 423.1 & 1.83 \\
+states $b_G=512$ & 327.39764313 & $-0.146$ & 386.9 & 319.0 & 204.4 & 635.9 & 2.63 \\
+states, no cut & 327.39782478 & $-0.145$ & 743.3 & 679.1 & 206.4 & 994.2 & 8.28 \\
+direct, entries, $b_G=128$ & 327.39737672 & $-0.146$ & 20.6 & 253.5 & 393.3 & 455.0 & 1.49 \\
+direct, topq, $b_G=32$ (old) & 327.39777562 & $-0.146$ & 20.1 & 1616.6 & 1737.8 & 1806.7 & 3.25 \\
+\bottomrule
+\end{tabular}
+\end{center}
+For the direct rows the G fill is inside pass~3. Why $b_G=128$ loses 12.76: Ther's crossing stems A (31--203 to 40--194, 1-based, minimum pair probability 0.95) and B (41--296 to 48--289, 0.88) start from seed entries $(30,202)$ and $(40,295)$ (0-based), which exist only in their own pair's map. The cut scores a seed as an exterior-loop pair, $C_{\mathrm{pre}}(p'-1)\,\mathrm{at}\,\bar S_{\mathrm{pre}}(q'+1)$; both sit inside the 12--314 helix (probability 0.99), so they rank 158 of 498 and 182 of 434 and are dropped. Cutting only at pair states gives the same loss. $b_G=256$ keeps both.
+
+\paragraph{I.3 Five-sequence matrix ($b_G$ as listed).} Signed $d\log Z$ against topq $b_G=32$; from the task file (Ther checked against its log).
+Columns: $d\log Z$ of direct (entries cut, $b_G=128$) and of states ($b_G=128$); G fill seconds and peak RSS in MB, each as topq / direct / states.
+\begin{center}
+\small
+\begin{tabular}{@{}lrrll@{}}
+\toprule
+seq & direct & states & G fill (s) & peak RSS (MB) \\
+\midrule
+Ther & $-0.0004$ & $-12.615$ & 1617 / 254 / 90 & 3212 / 1489 / 1471 \\
+Deha & $+0.0012$ & $+0.0004$ & 1260 / 230 / 85 & 3036 / 1516 / 1496 \\
+Pseu & $-0.0005$ & $-0.0074$ & 1194 / 249 / 103 & 2892 / 1517 / 1543 \\
+RP150 & $-0.0000$ & $-0.0000$ & 33 / 15 / 7.5 & 509 / 441 / 438 \\
+RP486 & $+0.1055$ & $+0.2743$ & \tofill{topq rerun not finished} / 594 / 236 & \tofill{topq} / 2496 / 2732 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{I.4 New default: states, $b_G=256$.} Binary PAPER (\texttt{dp03\_g256}), out \texttt{growth\_read/step2/}. CPU seconds.
+\begin{center}
+\small
+\begin{tabular}{@{}lrrrrrrrr@{}}
+\toprule
+seq & $n$ & pass 1 & pass 2 & G fill & pass 3 & total & RSS (GB) & $\log Z$ \\
+\midrule
+RP150 & 150 & 0.08 & 12.1 & 9.6 & 22.8 & 42.8 & 0.46 & 116.28132370 \\
+Ther & 349 & 0.62 & 213.2 & 164.8 & 167.1 & 423.1 & 1.83 & 327.39766236 \\
+Deha & 352 & 0.62 & 185.8 & 144.4 & 178.8 & 405.5 & 1.81 & 233.58001232 \\
+Pseu & 353 & 0.59 & 193.0 & 150.8 & 277.7 & 511.7 & 1.98 & 215.53327700 \\
+RP486 & 486 & 1.32 & 470.5 & 374.5 & 598.5 & 1142.9 & 3.75 & 440.33933304 \\
+\bottomrule
+\end{tabular}
+\end{center}
+Against NUPACK: Ther $-0.1456$ (old cut $-0.1455$), Deha $-1.5804$ ($-1.5817$), Pseu $-0.2557$ ($-0.2534$); RP486 $\log Z$ is $+0.3102$ above the old cut (440.029104). The old cut took 1803, 1453, 1436, 64 and 5722\,s total on the same five. A rerun of the final tree (\texttt{/tmp/lp2/chk/final3}) gave the same $\log Z$ bit for bit with totals 4 to 10\% higher (452, 443, 562, 43, 1196\,s); the excess is in pass~2, which we attribute to other jobs on the node \tofill{node load during final3 not logged}.
+
+Conclusion: the states sweep satisfies the outside identity and, at $b_G=256$, matches the old cut's accuracy in 1.5 (RP150) to 5.0 (RP486) times less total CPU time (Ther 4.3, Deha 3.6, Pseu 2.8). It is the default. The pseudoknot seed is still ranked by its exterior score (I.2), so a sequence with a buried pseudoknot stem could need $b_G>256$.
+
+\subsection{J (unity-build split and dead-code pass; values unchanged)}
+\begin{itemize}[leftmargin=*]
+  \item Record: \texttt{tasks/}\allowbreak\texttt{2026-10-30-linearpass2-refactor.md}, \texttt{tasks/}\allowbreak\texttt{2026-10-30-dead-code-and-refs.md}, \texttt{docs/UNUSED\_CODE.md}, \texttt{docs/ARCHITECTURE.md}. Branch \texttt{LinearPass2}.
+  \item Split (\texttt{6f04eae}): \texttt{cpp/dp03\_l2r\_merged.cpp} (23{,}820 lines) moved into 50 parts under eight folders of \texttt{cpp/} (common, energy, pass1, pass2, pass3, exact, diag, cli), included by \texttt{cpp/main.cpp} in the original order. \texttt{g++ -E -P} output equal to \texttt{paper-v1} byte for byte; the shim build has the paper md5.
+  \item Dead code (\texttt{f90c40a}): gcov union over Ther, Deha, Pseu, RP486, HXB2 1--3000 (paper preset), the exact command on RNase~P 1--100, RP150 with \texttt{-{}-out-id} and with \texttt{-{}-g-trace}. Deleted about 10{,}950 lines, six files and 182 options (57 remain). Forward check: 919 of the 10{,}991 removed lines had executed; all are option-parser branches, folded constants, unwrapped \texttt{if} lines, printf literals or moved code. The reverse check found one leftover \texttt{dp.outside()} call, removed before the commit.
+  \item Values: Ther 327.39766236390301, Deha 233.58001232046206, Pseu 215.53327699794767, RP150 116.28132370133829, RP486 440.33933303544205, every stdout line except \texttt{sec} identical to \texttt{paper-v1}; identity $V$ $7.816\times10^{-13}$, G $7.390\times10^{-13}$ (\texttt{make check}).
+  \item Not covered: the HXB2 1--3000 coverage run was killed for memory (cgroup headroom guard, after pass~2 at 6585\,s, peak 40.8\,GB), so lines that only long sequences execute may have been deleted. The exact command with pair probabilities segfaults in \texttt{outside()}, as \texttt{paper-v1} does.
+\end{itemize}
 
 \section{ArchiveII RMSD run arch17\_vg/v256\_g32\_A}
 \tofill{path and whether that run used sweep before ca8cd5e; no arch17\_vg/v256\_g32\_A directory found under the repo or /tmp in Task~N search}.
@@ -232,7 +385,7 @@ b4 moves $|d|$; bV flat in the tested range; floor still leaves Deha/List residu
 \section{Open questions}
 \subsection{Q1. HIV-1 NL4-3 $\log Z$ drop when raising b4}
 \paragraph{Stated measurements (user-provided facts for this notebook).}
-HIV-1 NL4-3 ($n{=}9173$), linear pass~2, \texttt{--no-bpp}, b1=200, b2=200, bV=128, bG=32, \texttt{--l2r-pbeam 200,2*b4,2*b4}, \texttt{--loop-cap 30}, \texttt{--max-loop 30}, \texttt{--ml-lead-cap 30}, \texttt{--sweep on}, \texttt{--v-sweep on}.
+HIV-1 NL4-3 ($n{=}9173$), linear pass~2, \texttt{-{}-no-bpp}, b1=200, b2=200, bV=128, bG=32, \texttt{-{}-l2r-pbeam 200,2*b4,2*b4}, \texttt{-{}-loop-cap 30}, \texttt{-{}-max-loop 30}, \texttt{-{}-ml-lead-cap 30}, \texttt{-{}-sweep on}, \texttt{-{}-v-sweep on}.
 \begin{itemize}[leftmargin=*]
   \item b4=1000: $\log Z{=}4341.103359$, wall 2:42:44, 54.0\,GB.
   \item b4=3000: $\log Z{=}4329.288287$, wall 4:30:30, 76.1\,GB.
@@ -240,16 +393,27 @@ HIV-1 NL4-3 ($n{=}9173$), linear pass~2, \texttt{--no-bpp}, b1=200, b2=200, bV=1
 The drop is non-monotone in beam width (larger b4, smaller $\log Z$).
 
 \paragraph{Evidence search (Task~N, read-only).}
-We searched git messages/diffs on \texttt{fix-lambda} and \texttt{--all} for HIV, NL4-3, monoton, b2, nested beam, logZ drop; \texttt{/tmp/new\_exactness}; \texttt{saureus\_b4/report.txt} (S.~aureus b4 series, not NL4-3); \texttt{BEAM\_BY\_ARITY.md}; agent transcripts under \texttt{.cursor/projects/.../agent-transcripts}. No file, log, or commit in that search establishes that the NL4-3 drop was traced to small b2=200. Related but distinct: \texttt{saureus\_b4/report.txt} shows non-monotone $\log Z$ vs b4 on another long sequence (b4 1000 ${\to}$ 1801.85, b4 2000 ${\to}$ 1799.98, b4 3000 ${\to}$ 1800.80) without a b2 diagnosis. Binary path, commit, and build time for the two HIV NL4-3 runs: \tofill{not found in searched trees}. Relative to \texttt{ca8cd5e}: \tofill{unknown without the binary stamp}.
+We searched git messages/diffs on \texttt{fix-lambda} and \texttt{-{}-all} for HIV, NL4-3, monoton, b2, nested beam, logZ drop; \texttt{/tmp/new\_exactness}; \texttt{saureus\_b4/report.txt} (S.~aureus b4 series, not NL4-3); \texttt{BEAM\_BY\_ARITY.md}; agent transcripts under \texttt{.cursor/projects/.../agent-transcripts}. No file, log, or commit in that search establishes that the NL4-3 drop was traced to small b2=200. Related but distinct: \texttt{saureus\_b4/report.txt} shows non-monotone $\log Z$ vs b4 on another long sequence (b4 1000 ${\to}$ 1801.85, b4 2000 ${\to}$ 1799.98, b4 3000 ${\to}$ 1800.80) without a b2 diagnosis. Binary path, commit, and build time for the two HIV NL4-3 runs: \tofill{not found in searched trees}. Relative to \texttt{ca8cd5e}: \tofill{unknown without the binary stamp}.
 
 \paragraph{Q1 conclusion.}
 We do not have on-disk evidence that the NL4-3 b4=1000${\to}$3000 $\log Z$ drop was established as a b2=200 effect. That explanation remains unverified in this notebook.
 
+\subsection{Q2. Is $b_G=256$ enough when a pseudoknot stem is buried in a nested helix?}
+The states cut ranks a pseudoknot seed by its exterior-loop score (I.2). On Ther $b_G=128$ drops both seeds ($d\log Z=-12.76$) and $b_G=256$ keeps them. Only five sequences have been run at the new default (I.4); the other 13 of the 16-sequence set and any long sequence have not.
+
+\subsection{Q3. Lazy vs states at the same beams}
+H compares lazy with the \texttt{ca8cd5e} linear G, and I compares states with the old topq cut. No run compares lazy (\texttt{-{}-sweep off}) with states at today's beams on the same node, so the cost of states relative to lazy is not known. The lazy code is still present at \texttt{f90c40a} but has not run since the dead-code pass.
+
+\subsection{Q4. Smaller gaps}
+Direct G stays below $\beta^b$ on every pair that differs (median $\log(\mathrm{direct}/\beta^b)=-1.13$), and the gap is not localized (I.1). The exact command with pair probabilities segfaults in \texttt{outside()} (J). The exact references have no commit (reference section).
+
 \section{Next steps}
 \begin{enumerate}[leftmargin=*]
-  \item Wait for D (16-seq default+accurate, fixed sweep ON, bpp on) and C (HXB2 $n\in\{1000,\ldots,9700\}$, sweep off/on); fold tables into this notebook.
-  \item Revisit Q1 only with a logged b2 ablation on NL4-3, or locate the original HIV run directory.
-  \item After each finished slice of Task~D/C, append an experiment entry under the notebook rule.
+  \item Run the 16-sequence set at the paper preset with the current binary (\texttt{build/dp03}) and record $|d\log Z|$, RMSD and time per pass (Q2).
+  \item Run lazy (\texttt{-{}-sweep off}, binary of tag \texttt{paper-v1}) and states at identical beams, one job per node, on Ther, Deha, Pseu and RP486 (Q3).
+  \item Finish the HXB2 1--3000 coverage check of the dead-code pass, or rerun it with more memory headroom, and restore any line only it executes (J).
+  \item Revisit Q1 only with a logged $b_2$ ablation on NL4-3, or locate the original HIV run directory.
+  \item Print the actual G mode in the run report instead of the fixed \texttt{g\_cut topq}.
 \end{enumerate}
 
 \end{document}
