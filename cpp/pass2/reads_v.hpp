@@ -114,13 +114,24 @@
     rfv_sec += std::chrono::duration<double>(std::chrono::steady_clock::now() - rfv_t0).count();
     return prVod.emplace(key, std::move(o)).first->second.span();
   }
+  // mu of the pair (x, y) at the outer left end xs, and the kind of that lookup. v_map_kind is
+  // the same test over the same map, so the two are folded here: one prMu lookup for the pair
+  // instead of three (the hot caller, rfv_key over the closings, does this ~65M times at n=150).
+  // The counters are the ones mu_at's callers used to get from v_map_kind, unchanged.
   double mu_at(int x, int y, int xs, int st = -1) {
-    const int kind = v_map_kind(x, y, xs);
-    if (kind == 0) {
-      auto it = stem_->prMu.find(key2(x, y));
-      return it->second.find(key2(xs, 0))->second;
+    if (!stem_) {
+      note_kind(vm_i, vm_ii, vm_iii, st, 3);
+      return NEG_INF;
     }
-    note_kind(vm_i, vm_ii, vm_iii, st, kind);
+    auto it = stem_->prMu.find(key2(x, y));
+    if (it == stem_->prMu.end()) {
+      note_kind(vm_i, vm_ii, vm_iii, st, 3);
+      return NEG_INF;
+    }
+    auto jt = it->second.find(key2(xs, 0));
+    if (jt != it->second.end() && jt->second > HALF_NEG) return jt->second;
+    note_kind(vm_i, vm_ii, vm_iii, st,
+              p2_v_cap > 0 && static_cast<int>(it->second.size()) >= p2_v_cap ? 1 : 2);
     return NEG_INF;
   }
   // V of the root x.y (seed: x.y is the stem's inner pair) at the outer left end xs
