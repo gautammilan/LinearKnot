@@ -117,21 +117,28 @@
   // mu of the pair (x, y) at the outer left end xs, and the kind of that lookup. v_map_kind is
   // the same test over the same map, so the two are folded here: one prMu lookup for the pair
   // instead of three (the hot caller, rfv_key over the closings, does this ~65M times at n=150).
-  // The counters are the ones mu_at's callers used to get from v_map_kind, unchanged.
-  double mu_at(int x, int y, int xs, int st = -1) {
+  // The counters are the ones mu_at's callers used to get from v_map_kind, unchanged. `kind`
+  // reports that same kind to a caller that has to replay it later (rfv_key's memo), 0 on a hit.
+  double mu_at(int x, int y, int xs, int st = -1, int* kind = nullptr) {
     if (!stem_) {
+      if (kind) *kind = 3;
       note_kind(vm_i, vm_ii, vm_iii, st, 3);
       return NEG_INF;
     }
     auto it = stem_->prMu.find(key2(x, y));
     if (it == stem_->prMu.end()) {
+      if (kind) *kind = 3;
       note_kind(vm_i, vm_ii, vm_iii, st, 3);
       return NEG_INF;
     }
     auto jt = it->second.find(key2(xs, 0));
-    if (jt != it->second.end() && jt->second > HALF_NEG) return jt->second;
-    note_kind(vm_i, vm_ii, vm_iii, st,
-              p2_v_cap > 0 && static_cast<int>(it->second.size()) >= p2_v_cap ? 1 : 2);
+    if (jt != it->second.end() && jt->second > HALF_NEG) {
+      if (kind) *kind = 0;
+      return jt->second;
+    }
+    const int mk = p2_v_cap > 0 && static_cast<int>(it->second.size()) >= p2_v_cap ? 1 : 2;
+    if (kind) *kind = mk;
+    note_kind(vm_i, vm_ii, vm_iii, st, mk);
     return NEG_INF;
   }
   // V of the root x.y (seed: x.y is the stem's inner pair) at the outer left end xs
@@ -170,20 +177,72 @@
     if (v < HALF_NEG) ++rfv_miss;
     return v;
   }
+  // Memo of the v-sweep rfv_key. What the sum reads: the closings of (ls, seed, p, q) and, per
+  // closing, mu_at's prMu lookup at xs. The closings read E, cap, dz, pair_bonus, pr_ml_close,
+  // stem_ml_span and (rs) the Qm column c-1, which closings_rs only ever reads at c-1 < q --
+  // columns filled and pruned in an earlier step of the same inside sweep. prMu is pass 2's and
+  // is read-only here. So the sum is a function of (ls, seed, p, q, xs) alone, and the cached
+  // value is the same double the uncached code computes: same closings, same order, same
+  // log_add chain. The call's miss counts are cached with it, so [vmiss]/[vmiss3] see the same
+  // increments on the same calls. key3 fits p < 2^22 and 2q + seed, xs < 2^21 (n <= 1 << 20).
+  struct RfvMemoEnt {
+    double s;
+    uint32_t k1, k2, k3;  // mu_at misses by kind (i) map full, (ii) map not full, (iii) no map
+  };
+  FastMap<uint64_t, RfvMemoEnt> rfvMemo[2];
+  long long rfv_memo_hit = 0, rfv_memo_miss = 0;
+  // The reuse this memo lives on is the same (p, q, xs) question coming back from different
+  // (x, y) pairs of a step and from later steps: 87.5% hits on RP150 lazy, and the same 3.65M
+  // hits over 521K entries on the uncapped runs of tests/identity_check.sh. It is not there for
+  // every input though: an uncut lazy G read (--bG-read 1e7 with an uncut V) asks each key once,
+  // and the table then costs a random access per call for nothing. So the first kRfvMemoWarm
+  // calls decide, a table that is not paying for itself is dropped and not refilled, and a hard
+  // entry cap bounds the memory on long inputs. Neither changes a value or a [vmiss] counter:
+  // a disabled memo recomputes exactly what the uncached code computed, and a hit replays it.
+  static constexpr long long kRfvMemoWarm = 200000;   // calls before the hit rate is judged
+  static constexpr long long kRfvMemoMinHit = 50000;  // 25% of the warmup, else off
+  static constexpr size_t kRfvMemoMax = 16u << 20;    // entries per map, memory backstop
+  bool rfv_memo_on = true;
   // U key (ls / rs of p at step q): sum over its closings c of w_c V(c.x, c.y) at xs
   double rfv_key(bool ls, int p, bool seed, int q, int xs) {
     if (p2_vsweep) {
       ++rfv_look;
       ++rfv_look_u;
+      const bool memo = rfv_memo_on && n <= (1 << 20);
+      const uint64_t mkey = key3(p, 2 * q + (seed ? 1 : 0), xs);
+      auto& m = rfvMemo[ls ? 1 : 0];
+      if (memo) {
+        auto mt = m.find(mkey);
+        if (mt != m.end()) {
+          ++rfv_memo_hit;
+          const RfvMemoEnt& e = mt->second;
+          vm_i[ST_U] += e.k1;
+          vm_ii[ST_U] += e.k2;
+          vm_iii[ST_U] += e.k3;
+          if (e.s < HALF_NEG) {
+            ++rfv_miss;
+            ++rfv_miss_u;
+            ++rfv_key0_u;
+          } else if (e.k1 + e.k2 + e.k3 > 0) {
+            ++rfv_part_u;
+          }
+          return e.s;
+        }
+      }
       std::vector<Closing> cl;
       if (ls) pr_ls_closings(p, seed, q, cl);
       else closings_rs(p, q, cl);
       double s = NEG_INF;
-      int missed = 0;
+      int missed = 0, k1 = 0, k2 = 0, k3 = 0, kind = 0;
       for (const Closing& c : cl) {
-        const double v = mu_at(c.x, c.y, xs, ST_U);
+        const double v = mu_at(c.x, c.y, xs, ST_U, &kind);
         if (v > HALF_NEG) s = log_add(s, c.w + v);
-        else ++missed;
+        else {
+          ++missed;
+          if (kind == 1) ++k1;
+          else if (kind == 2) ++k2;
+          else if (kind == 3) ++k3;
+        }
       }
       if (s < HALF_NEG) {
         ++rfv_miss;
@@ -191,6 +250,18 @@
         ++rfv_key0_u;
       } else if (missed > 0) {
         ++rfv_part_u;
+      }
+      if (memo) {
+        ++rfv_memo_miss;
+        if (m.size() < kRfvMemoMax) {
+          m.emplace(mkey, RfvMemoEnt{s, static_cast<uint32_t>(k1), static_cast<uint32_t>(k2),
+                                     static_cast<uint32_t>(k3)});
+        }
+        if (rfv_memo_hit + rfv_memo_miss == kRfvMemoWarm && rfv_memo_hit < kRfvMemoMinHit) {
+          rfv_memo_on = false;  // no reuse in this run: stop caching
+          rfvMemo[0].clear();
+          rfvMemo[1].clear();
+        }
       }
       return s;
     }

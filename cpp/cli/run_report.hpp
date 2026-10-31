@@ -66,6 +66,14 @@
                    dp.rfv_miss, dp.rfv_look_u, dp.rfv_miss_u, dp.rfv_look_r, dp.rfv_miss_r,
                    dp.rfv_look_s, dp.rfv_miss_s, dp.rfv_key0_u, dp.rfv_part_u, dp.rfv_key0_r,
                    dp.vfb_n);
+      std::fprintf(stderr,
+                   "[stage] rfvmemo n %d on %d entries %zu hits %lld miss %lld approx_mb %.1f\n",
+                   static_cast<int>(seq.size()), dp.rfv_memo_on ? 1 : 0,
+                   dp.rfvMemo[0].size() + dp.rfvMemo[1].size(), dp.rfv_memo_hit,
+                   dp.rfv_memo_miss,
+                   static_cast<double>(dp.rfvMemo[0].size() + dp.rfvMemo[1].size()) *
+                       static_cast<double>(sizeof(uint64_t) + sizeof(DP03::RfvMemoEnt) + 2) /
+                       1048576.0);
       {
         static const char* sn[DP03::ST_N] = {"P1", "P2", "P3", "R", "S", "U"};
         for (int s = 0; s < DP03::ST_N; ++s)
