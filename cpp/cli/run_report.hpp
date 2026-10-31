@@ -537,6 +537,26 @@
     }
     std::vector<std::tuple<int, int, double>> P;
     if (do_bpp) P = dp.bpp(cutoff);
+    {
+      const double ntd = seq.empty() ? 1.0 : static_cast<double>(seq.size());
+      std::fprintf(stderr,
+                   "[stage] outside n %d cpu %.3f cpu_s_nt %.6f bpp_cpu %.3f hwm_mb %.1f "
+                   "hwm_mb_nt %.4f\n",
+                   static_cast<int>(seq.size()), dp.sec_outside, dp.sec_outside / ntd, dp.sec_bpp,
+                   hwm_mb(), hwm_mb() / ntd);
+    }
+#ifdef LK_FINE_TIMERS
+    std::fprintf(stderr,
+                 "[fine] %s n %d p2_grow %.3f p2_sel %.3f p2_static %.3f p2_qz %.3f "
+                 "p3_nest qb %.3f qm %.3f branch %.3f qz %.3f c %.3f "
+                 "p3_steps A %.3f S %.3f B %.3f closes %.3f spawn %.3f init %.3f "
+                 "reads k %.3f key %.3f outside %.3f bpp %.3f\n",
+                 sid.c_str(), static_cast<int>(seq.size()), dp.pr_grow_sec, dp.pr_sel_sec,
+                 dp.pr_static_sec, stem.p2_qz_sec, dp.sec_qb, dp.sec_qm, dp.sec_branch, dp.sec_qz,
+                 dp.sec_c, dp.l2r_sec[0], dp.l2r_sec[1], dp.l2r_sec[2], dp.l2r_sec[3],
+                 dp.l2r_sec[4], dp.l2r_isec, dp.sx_k_sec, dp.sx_rkey_sec, dp.sec_outside,
+                 dp.sec_bpp);
+#endif
     double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     if (!id.empty()) std::printf(">%s\n", id.c_str());
     std::printf("logZ %.17g\n", logz);

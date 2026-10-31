@@ -517,6 +517,7 @@
   int pr_gdepth = 0;
   struct PrGrowTimer {
     DP03& d;
+#ifdef LK_FINE_TIMERS
     std::chrono::steady_clock::time_point t0;
     double s0;
     explicit PrGrowTimer(DP03& x) : d(x), t0(std::chrono::steady_clock::now()), s0(x.pr_sel_sec) {
@@ -530,6 +531,10 @@
         d.pr_grow_sec += dt;
       }
     }
+#else
+    explicit PrGrowTimer(DP03& x) : d(x) { ++d.pr_gdepth; }
+    ~PrGrowTimer() { --d.pr_gdepth; }
+#endif
   };
 
   // Growth profiles (scan left, final once built): G(x, y) = [end_ok] at(x, y) at key (x, y)
