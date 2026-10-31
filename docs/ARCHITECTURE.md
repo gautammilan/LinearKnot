@@ -23,6 +23,16 @@ differs; logZ on the paper preset and the identity check are unchanged.
 
 Never add `-ffast-math` or FMA contraction: results are compared bit for bit.
 
+`cpp/third_party/` holds one vendored dependency, `ankerl::unordered_dense` 4.5.0 (MIT, single
+header, provenance and sha256 in `cpp/third_party/README.md`). `cpp/common/fast_map.hpp` is the
+only file that includes it and defines `FastMap`, used for the pass-3 index maps
+(`Tab4::Grp::idx`, `Tab4::vidx`, `SMap::idx`, `lArm`). Those maps are lookup-only, so the swap
+cannot change a result; do not use `FastMap` for a map whose iteration order feeds a sum.
+
+Optional build knob: `-DLK_FINE_TIMERS` compiles the pass-2/pass-3 sub-stage clocks back in and
+makes the binary print the `[fine]` attribution line. Without it those fields stay 0 and the
+clocks cost nothing (`tasks/2026-10-31-performance-pass.md`).
+
 ## Passes and beams
 
 | pass | what it computes | beam | flag | code variable |
