@@ -31,27 +31,33 @@
     auto& placed = prRR.emplace(key, std::move(r)).first->second;
     return placed;
   }
+  // sx_rkey_sec is timed only when built with -DLK_FINE_TIMERS; otherwise it stays 0.
   const RN& rec_key(bool ls, int p, bool seed, int q) {
-    const auto tick = []() { return std::chrono::steady_clock::now(); };
-    auto t0 = tick();
-    auto charge = [&](std::chrono::steady_clock::time_point t1) {
-      sx_rkey_sec += std::chrono::duration<double>(t1 - t0).count();
+#ifdef LK_FINE_TIMERS
+    auto t0 = std::chrono::steady_clock::now();
+    auto mark = [&]() { t0 = std::chrono::steady_clock::now(); };
+    auto charge = [&]() {
+      sx_rkey_sec += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     };
+#else
+    auto mark = []() {};
+    auto charge = []() {};
+#endif
     std::unordered_map<int, RN>& m = ls ? prRKls : prRKrs;
     const int key = ls ? 2 * p + (seed ? 1 : 0) : p;
     auto it = m.find(key);
     if (it != m.end()) {
-      charge(tick());
+      charge();
       return it->second;
     }
     PrGrowTimer gt(*this);
     std::vector<Closing> cl;
     if (ls) pr_ls_closings(p, seed, q, cl);
     else closings_rs(p, q, cl);
-    charge(tick());
+    charge();
     std::vector<RTerm> t;
     for (const Closing& c : cl) t.push_back({&rec_root(c.x, c.y, false), c.w, 0});
-    t0 = tick();
+    mark();
     rTerms = std::move(t);
     racc_begin();
     racc_refs();
@@ -63,7 +69,7 @@
     gm_step += rbytes(r);
     gm_update();
     auto placed = m.emplace(key, std::move(r)).first;
-    charge(tick());
+    charge();
     return placed->second;
   }
 

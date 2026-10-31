@@ -120,6 +120,8 @@
   long long r_hair = 0, r_int = 0, r_m2xp = 0, r_m2multi = 0, r_muext = 0, r_mmu = 0, r_mp = 0,
             r_extc = 0;
   double sec_qb = 0, sec_qm = 0, sec_branch = 0, sec_qz = 0, sec_c = 0;
+  // Pass 3 outside + the pair table built from it (bpp), always on (two clock reads per run).
+  double sec_outside = 0, sec_bpp = 0;
   double sec_hair = 0, sec_int = 0, sec_m2xp = 0, sec_emit = 0, sec_mclose = 0, sec_mp = 0;
   double prof_qz_sec = 0.0;
   double sx_k_sec = 0, sx_rkey_sec = 0;
@@ -162,11 +164,18 @@
   double pidx_sec = 0.0, pidx_mb = 0.0;
   long long pidx_nodes = 0, pidx_upd = 0, aq_arms = 0, gap_epochs = 0, gap_miss = 0, v_before = 0,
             v_after = 0;
+  // The section clocks are a compile-time option (-DLK_FINE_TIMERS): two clock reads per
+  // section cost more than the sections themselves on the per-column paths, so without the
+  // macro every *_sec below stays 0 and no clock is read.
   struct SecTimer {
+#ifdef LK_FINE_TIMERS
     double& acc;
     std::chrono::steady_clock::time_point t0;
     explicit SecTimer(double& a) : acc(a), t0(std::chrono::steady_clock::now()) {}
     ~SecTimer() { acc += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(); }
+#else
+    explicit SecTimer(double&) {}
+#endif
   };
   // stop_phase: where the stop was taken (0 scan, 1 the one-time V build); cur_j: current step.
   int pr_pdepth = 0, stop_j = -1, stop_phase = 0, cur_j = -1;
@@ -178,8 +187,18 @@
   }
   struct PrPartnerTimer {
     DP03& d;
+#ifdef LK_FINE_TIMERS
     std::chrono::steady_clock::time_point t0;
     explicit PrPartnerTimer(DP03& x) : d(x), t0(std::chrono::steady_clock::now()) { ++d.pr_pdepth; }
+    ~PrPartnerTimer() {
+      if (--d.pr_pdepth == 0)
+        d.pr_partner_sec +=
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    }
+#else
+    explicit PrPartnerTimer(DP03& x) : d(x) { ++d.pr_pdepth; }
+    ~PrPartnerTimer() { --d.pr_pdepth; }
+#endif
   };
   // av / phi: ranked Qg states with both L-stem factors finite, the sum / min / max of
   // (log Hav + hr_c(q)) - (log H - log C0[q]) over them, states finite under the new mode only

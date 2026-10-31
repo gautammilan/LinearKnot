@@ -160,7 +160,12 @@
   }
 
   std::vector<std::tuple<int, int, double>> bpp(double cutoff) {
+    const auto t_out = std::chrono::steady_clock::now();
     outside();
-    return collect_bpp(cutoff);
+    sec_outside += std::chrono::duration<double>(std::chrono::steady_clock::now() - t_out).count();
+    const auto t_pairs = std::chrono::steady_clock::now();
+    std::vector<std::tuple<int, int, double>> p = collect_bpp(cutoff);
+    sec_bpp += std::chrono::duration<double>(std::chrono::steady_clock::now() - t_pairs).count();
+    return p;
   }
 

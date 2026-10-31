@@ -1,5 +1,11 @@
 // Timers: cpu_sec (clock), ru_cpu (user + sys from getrusage), hwm_mb (peak RSS).
 //
+// Build with -DLK_FINE_TIMERS to enable the sub-stage clocks (SecTimer, PrGrowTimer,
+// PrPartnerTimer, the K-read and rec_key charges). They read steady_clock twice per call and
+// sit in per-column loops, so without the macro they are compiled out and their *_sec values
+// stay 0. Only the per-pass `[stage]` lines (pass1 / pass2 / scan / outside, from getrusage)
+// are always on.
+//
 // Fragment of the unity build: #included by cpp/main.cpp at this point of the original
 // file (inside namespace / class DP03 / main() as main.cpp shows); not a standalone header.
 

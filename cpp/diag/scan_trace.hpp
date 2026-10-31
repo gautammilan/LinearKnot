@@ -4,12 +4,18 @@
 // Fragment of the unity build: #included by cpp/main.cpp at this point of the original
 // file (inside namespace / class DP03 / main() as main.cpp shows); not a standalone header.
 
+  // sx_k_sec and kl_in_read_sec ([kl-m]) are timed only when built with -DLK_FINE_TIMERS;
+  // otherwise they stay 0.
   double lsc_L(const RN& r, int arm, int who) {
+#ifdef LK_FINE_TIMERS
     const auto t0 = std::chrono::steady_clock::now();
+#endif
     auto done = [&](double s) {
+#ifdef LK_FINE_TIMERS
       const double dt = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
       sx_k_sec += dt;
       kl_in_read_sec += dt;
+#endif
       return s;
     };
     if (arm < 0) return done(NEG_INF);
