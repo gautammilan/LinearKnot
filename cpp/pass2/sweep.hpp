@@ -11,7 +11,7 @@
       if (g_sweep == G_SWEEP_DIRECT) {
         sw_filled = true;
         // ntrUL must exist before sw_fill's cap_ga (same L trunc key as racc_finish_trunc).
-        if (g_ntr_K > 0 && !p2_g_suffix) {
+        if (g_ntr_K > 0) {
           const auto t0 = std::chrono::steady_clock::now();
           ntr_init();
           sw_ntr_init_sec +=
@@ -322,10 +322,7 @@
       v.reserve(byq.size());
       for (const auto& [q, g] : byq) {
         double s = NEG_INF;
-        if (p2_g_suffix) {
-          const double sb = stem_->prS[static_cast<size_t>(q + 1)];
-          if (sb > HALF_NEG) s = g + sb;
-        } else if (q < static_cast<int>(ntrUL.size()) && ntrUL[q] > HALF_NEG) {
+        if (q < static_cast<int>(ntrUL.size()) && ntrUL[q] > HALF_NEG) {
           s = g + ntrUL[q];
         }
         if (s > HALF_NEG) v.push_back({q, g, s});

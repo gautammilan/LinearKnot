@@ -1,11 +1,11 @@
-// Energy parameters. PkParams: the DP03 pseudoknot penalties (beta1, beta2, beta3, ...) for
-// --params dp03 | dp09*; nested-loop tables (stack, hairpin, bulge, interior); the NUPACK
+// Energy parameters. PkParams: the DP03 pseudoknot penalties (beta1, beta2, beta3, ...);
+// nested-loop tables (stack, hairpin, bulge, interior); the NUPACK
 // rna1999.dG loader (--material rna1999) and the ViennaRNA 2004 loader (--material vienna2004).
 //
 // Fragment of the unity build: #included by cpp/main.cpp at this point of the original
 // file (inside namespace / class DP03 / main() as main.cpp shows); not a standalone header.
 
-// Multiloop and pseudoknot penalties (kcal/mol), selected with --params.
+// Multiloop and pseudoknot penalties (kcal/mol).
 //   stem:      per pseudoknot stem (Qgl); NUPACK's beta2, HotKnots' Pb (per band)
 //   nest:      per nested pair inside a gap (Qz); beta2 / HotKnots' Pps
 //   nest_pk_k: a pseudoknot nested in a gap pays nest_pk_k * nest (+ beta1p)

@@ -26,16 +26,6 @@
   void stem_cache_step(int q) {
     if (q == stc_q) return;
     stc_q = q;
-    std::unique_ptr<SecTimer> ptm(lpf ? new SecTimer(lpf_stc_sec) : nullptr);
-    if (lpf) {
-      ++lpf_stc_n;
-      lpf_stc_buckets += static_cast<long long>(stBc.bucket_count() + stBgc.bucket_count() + stX.bucket_count() +
-                                                stHc.bucket_count() + stOc.bucket_count());
-      if (pr_on)
-        lpf_stc_scan += static_cast<long long>(prTc.size() + prAQ.size() + prKls.bucket_count() +
-                                               prKrs.bucket_count() + prRKls.bucket_count() +
-                                               prRKrs.bucket_count() + prRT.bucket_count() + prAc.bucket_count());
-    }
     stBc.clear();
     stBgc.clear();
     stX.clear();
@@ -46,7 +36,6 @@
       stPg.clear();
       stPls.clear();
       stPrs.clear();
-      stM.clear();
     }
     if (pr_on) pr_step(q);
   }
@@ -94,79 +83,11 @@
     return bg;
   }
 
-  // L-stem factor of a final right end q: log H(u, v, q) - log C0[q]; with hr_av the index
-  // is st->index_av (av or phi entries), and with hr_sq (av) the constant is log S[q+1]
-  // (h + hr_c(q) equals h - C0[q] bit for bit otherwise).
-  bool hr_av = false, hr_sq = false, hr_check = false;
-  double hr_h(int u, int v, int q) const { return hr_av ? stem_->Hav(u, v, q) : stem_->H(u, v, q); }
-  double hr_c(int q) const { return hr_sq ? stem_->S[q + 1] : -stem_->C0[q]; }
+  // L-stem factor of a final right end q: log H(u, v, q) - log C0[q].
+  double hr_h(int u, int v, int q) const { return stem_->H(u, v, q); }
+  double hr_c(int q) const { return -stem_->C0[q]; }
 
-  // --stem-hr-check: Hav(u, v, q) by listing every partner stem (innermost x'.y', x' in
-  // [u+1, v-1], y' > q, stacked outward while the pairs can form) and summing
-  // E_out E_in prod w_stack prod phi_gamma in long double.
-  double hr_naive(int u, int v, int q) const {
-    if (stem_->hr_phi) return hr_naive_phi(u, v, q);
-    std::vector<long double> terms;
-    for (int x = u + 1; x <= v - 1; ++x)
-      for (int y = q + 1; y < n; ++y) {
-        if (y - x < MIN_PAIR || !E.pairs(x, y) || !E.end_ok(x, y)) continue;
-        const double lp0 = stem_->lphi[ix(x, y)];
-        if (lp0 < HALF_NEG) continue;
-        long double w = static_cast<long double>(E.at(x, y)) + lp0;
-        for (int i = x, j = y;;) {
-          if (E.end_ok(i, j)) terms.push_back(w + E.at(i, j));
-          const int i0 = i - 1, j0 = j + 1;
-          if (i0 < 0 || j0 > n - 1 || j0 - i0 < MIN_PAIR || !E.pairs(i0, j0)) break;
-          const double s = E.stem_interior(i0, i, j, j0), lp = stem_->lphi[ix(i0, j0)];
-          if (s < HALF_NEG || lp < HALF_NEG) break;
-          w += static_cast<long double>(s) + lp;
-          i = i0;
-          j = j0;
-        }
-      }
-    if (terms.empty()) return NEG_INF;
-    long double m = *std::max_element(terms.begin(), terms.end()), sum = 0.0L;
-    for (long double t : terms) sum += std::exp(t - m);
-    return static_cast<double>(m + std::log(sum));
-  }
 
-  // --stem-hr-check with phi: H_R'(u, v, q) by listing every partner stem of the original
-  // table (innermost x'.y' an end pair, x' in [u+1, v-1], y' > q; outward steps with at most
-  // the table's loop unpaired bases per side through pairs that can form; outermost pair an
-  // end pair) and summing E_in C0[y'-1] prod phi_gamma prod w E_out S[j_1+1] in long double.
-  double hr_naive_phi(int u, int v, int q) const {
-    const int lc = std::min(stem_->loop, cap);
-    auto partner = [&](int i, int j) {
-      if (i < 0 || j > n - 1) return false;
-      const auto& pr = partners_right[i];
-      return std::find(pr.begin(), pr.end(), j) != pr.end();
-    };
-    std::vector<long double> terms;
-    std::vector<std::tuple<int, int, long double>> stack;
-    for (int x = u + 1; x <= v - 1; ++x)
-      for (int y : partners_right[x]) {
-        if (y <= q || !E.end_ok(x, y)) continue;
-        const double lp = stem_->lphi[ix(x, y)];
-        if (lp < HALF_NEG) continue;
-        stack.emplace_back(x, y, static_cast<long double>(E.at(x, y)) + stem_->C0[y - 1] + lp);
-        while (!stack.empty()) {
-          auto [i, j, w] = stack.back();
-          stack.pop_back();
-          if (E.end_ok(i, j)) terms.push_back(w + E.at(i, j) + stem_->S[j + 1]);
-          for (int i0 = std::max(0, i - 1 - lc); i0 < i; ++i0)
-            for (int j0 = j + 1; j0 <= std::min(n - 1, j + 1 + lc); ++j0) {
-              if (!partner(i0, j0)) continue;
-              const double s = E.stem_interior(i0, i, j, j0), lp0 = stem_->lphi[ix(i0, j0)];
-              if (s < HALF_NEG || lp0 < HALF_NEG) continue;
-              stack.emplace_back(i0, j0, w + s + lp0);
-            }
-        }
-      }
-    if (terms.empty()) return NEG_INF;
-    long double m = *std::max_element(terms.begin(), terms.end()), sum = 0.0L;
-    for (long double t : terms) sum += std::exp(t - m);
-    return static_cast<double>(m + std::log(sum));
-  }
 
   double stem_H_cached(int u, int v, int q2) {
     const uint64_t key = key3(u, v, q2);
@@ -217,7 +138,7 @@
             }
         grow_layer += static_cast<long long>(nxt.size());
         keep.assign(nxt.size(), 1);
-        if (grow_cut > 0.0 && !nxt.empty()) {
+        if (!nxt.empty()) {
           double mx = NEG_INF;
           for (const ExtNode& x : nxt) mx = std::max(mx, x.w);
           const double thr = lcut + mx;
@@ -227,7 +148,7 @@
               ++grow_cut_drop;
             }
         }
-        if (grow_nodes > 0) {
+        {
           fresh.clear();
           for (size_t k = 0; k < nxt.size(); ++k)
             if (keep[k] && !tidx.count(key2(nxt[k].d, nxt[k].q))) fresh.push_back(k);
@@ -312,12 +233,10 @@
       const double h = stem_H_cached(u, v, x.q);
       if (h > HALF_NEG) {
         sl = four_score(x.d, u, v, a) + x.w + h + hr_c(x.q) + w_pk;
-        if (stem_consistent) sl += (E.at(u, v) + E.at(x.d, x.q));
       }
       const double bg = stem_Bg(x.d, u, v);
       if (bg > HALF_NEG) {
         sr = bg + a + x.w + stem_->S[x.q + 1];
-        if (stem_consistent) sr += (E.at(x.d, x.q) + E.w_beta1);
       }
       acc = log_add(acc, log_add(sl, sr));
     }
@@ -325,54 +244,7 @@
     return acc;
   }
 
-  // --stem-ext-check: sigma_ext by walking every wrap path separately (no shared path sums;
-  // H and Bg recomputed), every term summed in long double.
-  void ext_paths(int d, int q, int t, long double w, std::vector<std::tuple<int, int, long double>>& out) {
-    if (t > 0 && E.end_ok(d, q)) out.emplace_back(d, q, w);
-    if (t == stem_ext_max) return;
-    std::vector<std::pair<int, int>> mv;
-    if (stem_ext == 3) {
-      const int lg = std::min(grow_lg, cap);
-      for (int a = 0; a <= lg; ++a)
-        for (int b = 0; b <= lg; ++b) mv.emplace_back(a + 1, b + 1);
-    } else {
-      mv = {{1, 1}, {2, 1}, {1, 2}};
-      if (stem_ext == 1) mv.resize(1);
-    }
-    for (const auto& m : mv) {
-      const int i = d - m.first, j = q + m.second;
-      if (i < 0 || j > n - 1) continue;
-      const double s = E.stem_interior(i, d, q, j);
-      if (s < HALF_NEG) continue;
-      ext_paths(i, j, t + 1, w + static_cast<long double>(s) + pair_bonus, out);
-    }
-  }
 
-  double stem_ext_naive(int p, int u, int v, double a) {
-    std::vector<std::tuple<int, int, long double>> paths;
-    ext_paths(p, stc_q, 0, 0.0L, paths);
-    const long double w_pk = static_cast<long double>(E.w_beta1) + 2.0L * E.w_stem;
-    std::vector<long double> terms;
-    for (const auto& [d, q, w] : paths) {
-      const double h = hr_h(u, v, q);
-      if (h > HALF_NEG) {
-        long double s = static_cast<long double>(prefix_log(d)) + a + w + h + hr_c(q) + w_pk;
-        if (score_qz) s += qz_log(u + 1, v - 1);
-        if (stem_consistent) s += static_cast<long double>(E.at(u, v)) + E.at(d, q);
-        terms.push_back(s);
-      }
-      const double bg = stem_Bg_raw(d, u, v);
-      if (bg > HALF_NEG) {
-        long double s = static_cast<long double>(bg) + a + w + stem_->S[q + 1];
-        if (stem_consistent) s += static_cast<long double>(E.at(d, q)) + E.w_beta1;
-        terms.push_back(s);
-      }
-    }
-    if (terms.empty()) return NEG_INF;
-    long double m = *std::max_element(terms.begin(), terms.end()), sum = 0.0L;
-    for (long double t : terms) sum += std::exp(t - m);
-    return static_cast<double>(m + std::log(sum));
-  }
 
   // ------------------------------------------------- helper scores (Qgls, Qgrs)
   // Stop term of a stem with final outer pair d.q2 and inner pair (u, v), without alpha
@@ -385,12 +257,10 @@
       double s = prefix_log(d);
       if (score_qz) s += qz_log(u + 1, v - 1);
       sl = s + h + hr_c(q2) + (E.w_beta1 + 2.0 * E.w_stem);
-      if (stem_consistent) sl += (E.at(u, v) + E.at(d, q2));
     }
     const double bg = stem_Bg(d, u, v);
     if (bg > HALF_NEG) {
       sr = bg + stem_->S[q2 + 1];
-      if (stem_consistent) sr += (E.at(d, q2) + E.w_beta1);
     }
     return log_add(sl, sr);
   }
@@ -468,38 +338,6 @@
     return acc;
   }
 
-  // --stem-ext-check: the helper score by walking every closing and growth path separately
-  // (H and Bg recomputed), every term summed in long double.
-  double helper_naive(const std::vector<Closing>& cl, int u, int v, double a) {
-    std::vector<long double> terms;
-    std::vector<std::tuple<int, int, long double>> paths;
-    const long double w_pk = static_cast<long double>(E.w_beta1) + 2.0L * E.w_stem;
-    for (const Closing& c : cl) {
-      paths.clear();
-      paths.emplace_back(c.x, c.y, 0.0L);
-      ext_paths(c.x, c.y, 0, 0.0L, paths);
-      for (const auto& [d, q, w] : paths) {
-        const long double base = static_cast<long double>(c.w) + a + w;
-        const double h = hr_h(u, v, q);
-        if (h > HALF_NEG) {
-          long double s = base + prefix_log(d) + h + hr_c(q) + w_pk;
-          if (score_qz) s += qz_log(u + 1, v - 1);
-          if (stem_consistent) s += static_cast<long double>(E.at(u, v)) + E.at(d, q);
-          terms.push_back(s);
-        }
-        const double bg = stem_Bg_raw(d, u, v);
-        if (bg > HALF_NEG) {
-          long double s = base + bg + stem_->S[q + 1];
-          if (stem_consistent) s += static_cast<long double>(E.at(d, q)) + E.w_beta1;
-          terms.push_back(s);
-        }
-      }
-    }
-    if (terms.empty()) return NEG_INF;
-    long double m = *std::max_element(terms.begin(), terms.end()), sum = 0.0L;
-    for (long double t : terms) sum += std::exp(t - m);
-    return static_cast<double>(m + std::log(sum));
-  }
 
   // --stem-est-helpers nested: log sum over the closings (x, y) of w + beta_nested(x, y), in
   // closing order.  The closings depend only on (i, v == q) for Qgls and on c for Qgrs, so the
@@ -532,26 +370,8 @@
     return r;
   }
 
-  // --stem-ext-check (nested): the same score without the per-step cache, in long double.
-  double helper_nested_naive(bool ls, const Ent& e, int v, int q) {
-    std::vector<Closing> cl;
-    if (ls) closings_ls(e.p, v, q, cl);
-    else closings_rs(e.p, q, cl);
-    std::vector<long double> terms;
-    for (const Closing& c : cl) {
-      const double b = stem_->B(c.x, c.y);
-      if (b < HALF_NEG) continue;
-      long double t = static_cast<long double>(e.a) + c.w + b;
-      if (score_qz) t += qz_log(e.u + 1, v - 1);
-      terms.push_back(t);
-    }
-    if (terms.empty()) return NEG_INF;
-    long double m = *std::max_element(terms.begin(), terms.end()), sum = 0.0L;
-    for (long double t : terms) sum += std::exp(t - m);
-    return static_cast<double>(m + std::log(sum));
-  }
 
-  // ------------------------------------------------ profiles (--stem-est-profile)
+  // ------------------------------------------------ profiles
   // Sparse profile accumulator: entries in first-reached order, each summed in log space in the
   // order added; finish() sorts them by index (DP03._ProfAcc).
   struct ProfAcc {
@@ -603,10 +423,6 @@
     auto add = [&](int d, int q2, double g) {
       double cl = ((g + prefix_log(d)) + hr_c(q2)) + w_pk;
       double cr = g + stem_->S[q2 + 1];
-      if (stem_consistent) {
-        cl += E.at(d, q2);
-        cr += (E.at(d, q2) + E.w_beta1);
-      }
       acc.addL(q2, cl);
       acc.addR(d, cr);
     };
@@ -618,7 +434,7 @@
     return stP.emplace(key, std::move(p)).first->second;
   }
 
-  // ------------------------------------------------ arm chains (--stem-est-chain)
+  // ------------------------------------------------ arm chains
   // A step from pair x.y out to a kept pair x'.y' enclosing it, with log weight w; t = 0 (b)
   // interior, 1 (f), 2 (g), 3 (h) multiloop.
   struct ChainNbr {
@@ -653,7 +469,7 @@
         out.push_back({xo, *it, 0, s + pair_bonus});
       }
     }
-    if (!chain_ml || !E.end_ok(x, y)) return;
+    if (!E.end_ok(x, y)) return;
     const double br = E.w_bp + E.at(x, y);
     std::vector<std::pair<int, double>> qm;
     if (x >= 1) {
@@ -704,10 +520,6 @@
   void chain_stop(ProfAcc& acc, int x, int y) const {
     double cl = (prefix_log(x) + hr_c(y)) + (E.w_beta1 + 2.0 * E.w_stem);
     double cr = stem_->S[y + 1];
-    if (stem_consistent) {
-      cl += E.at(x, y);
-      cr += (E.at(x, y) + E.w_beta1);
-    }
     acc.addL(y, cl);
     acc.addR(x, cr);
   }
@@ -724,7 +536,7 @@
 
   // Drop entries below log(chain_cut) + the part's max (order kept).
   long long chain_trunc(std::vector<int>& ix, std::vector<double>& w) const {
-    if (chain_cut <= 0.0 || w.empty()) return 0;
+    if (w.empty()) return 0;
     const double thr = *std::max_element(w.begin(), w.end()) + std::log(chain_cut);
     size_t o = 0;
     for (size_t k = 0; k < w.size(); ++k)
@@ -793,52 +605,7 @@
     return chR.emplace(key, std::move(p)).first->second;
   }
 
-  // Every chain path from x.y (root: stop unconditional; later nodes need end_ok) with its
-  // weight summed in long double.
-  void chain_paths(int x, int y, bool root, long double w,
-                   std::vector<std::tuple<int, int, long double>>& out) {
-    if (root || E.end_ok(x, y)) out.emplace_back(x, y, w);
-    std::vector<ChainNbr> nb;
-    chain_nbrs(x, y, nb);
-    for (const ChainNbr& t : nb) chain_paths(t.x, t.y, false, w + t.w, out);
-  }
 
-  // --stem-profile-check with chain: the score of a state with inner pair (u, v) and log
-  // weight a closed by cl, every chain path's stop terms summed separately (as helper_naive);
-  // the path list of each root is enumerated once per run.
-  std::unordered_map<uint64_t, std::vector<std::tuple<int, int, long double>>> chPaths;
-  double chain_naive(const std::vector<Closing>& cl, int u, int v, double a) {
-    std::vector<long double> terms;
-    const long double w_pk = static_cast<long double>(E.w_beta1) + 2.0L * E.w_stem;
-    for (const Closing& c : cl) {
-      auto it = chPaths.find(key2(c.x, c.y));
-      if (it == chPaths.end()) {
-        it = chPaths.emplace(key2(c.x, c.y), std::vector<std::tuple<int, int, long double>>())
-                 .first;
-        chain_paths(c.x, c.y, true, 0.0L, it->second);
-      }
-      for (const auto& [d, q, w] : it->second) {
-        const long double base = static_cast<long double>(c.w) + a + w;
-        const double h = hr_h(u, v, q);
-        if (h > HALF_NEG) {
-          long double s = base + prefix_log(d) + h + hr_c(q) + w_pk;
-          if (score_qz) s += qz_log(u + 1, v - 1);
-          if (stem_consistent) s += static_cast<long double>(E.at(u, v)) + E.at(d, q);
-          terms.push_back(s);
-        }
-        const double bg = stem_Bg_raw(d, u, v);
-        if (bg > HALF_NEG) {
-          long double s = base + bg + stem_->S[q + 1];
-          if (stem_consistent) s += static_cast<long double>(E.at(d, q)) + E.w_beta1;
-          terms.push_back(s);
-        }
-      }
-    }
-    if (terms.empty()) return NEG_INF;
-    long double m = *std::max_element(terms.begin(), terms.end()), sum = 0.0L;
-    for (long double t : terms) sum += std::exp(t - m);
-    return static_cast<double>(m + std::log(sum));
-  }
 
   // ------------------------------------------ principled score (--stem-est-principled)
   // sigma(X) = alpha_X + log Out_hat(X); Out_hat follows DP03's edges outward from X: exact
@@ -847,28 +614,19 @@
   // Stem steps from a pair outward (pr_steps) run over the pre-pass kept pairs.  The growth G
   // of the scored stem takes Qm from the scan on its left; future stems H (profiles over
   // their outer ends) take Mbar on both sides.
-  bool pr_on = false, pr_check = false, pr_nested = false, pr_ml = true, pr_built = false;
+  bool pr_on = false, pr_built = false;
   int pr_loop = 30, pr_ml_span = 150, pr_ml_close = 30, pr_arms_k = 64;
-  bool pr_ratio = false, pr_gapfree = false, pr_cut_roots = false;
+  bool pr_ratio = false, pr_gapfree = false;
   double pr_arms_eps = 1e-3;
   int pr_arms_max = 256;
   double pr_cut = 1e-8;
-  // --pr-arms sep: the exterior term of the L-stem arm part over all arms, the gap filler made
-  // separable: Qz[u+1][v-1] S_q'(u, v), S = sum over arms xs >= u+1 (two: = u+1), x' <= v-1
-  // of e^phi / Zarm (arm_z 0: Qz[xs][x'], 1: e^(wu (x' - xs + 1))).  The multiloop-context
-  // term (Bml(p', ys), not one factor per arm) keeps the exact-placement arms of pr_select.
-  // qz_unp: the score's gap filler unpaired-only (test); sep_check: every distinct query
-  // against brute force and exact placement.
-  int pr_arms_mode = 0, pr_arm_z = 0;
-  bool pr_qz_unp = false, pr_sep_check = false;
-  bool pr_gsel = false, pr_gcheck = false;
+  bool pr_gsel = false;
   double pr_geps = 1e-6;
   int pr_gB = 512;
-  FILE* pr_dump = nullptr;
 
  public:
   // Growth instrumentation, per profile kind (0 node, 1 root, 2 key): entries before / after
-  // selection, distinct p' and q' after (and before) selection; under --grow-rec the nonzero
+  // selection, distinct p' and q' after (and before) selection; the nonzero
   // q' of g_L and p' of g_R (all built layers).  Memory in bytes of the stored growth data:
   // nodes and roots (kept for the run), helpers (cleared at PR_HG_MAX), the per-step root /
   // key caches; peaks over the run.

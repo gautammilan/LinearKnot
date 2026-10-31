@@ -124,17 +124,6 @@
       cs.push_back({k, q, dz ? a.acc : 0.0, a.u1, a.u2, key});
     }
     qz_cand += static_cast<long long>(cs.size());
-    if (g_beam_stats.f) {
-      std::vector<double> keys;
-      keys.reserve(cs.size());
-      for (const Cand& c : cs) keys.push_back(c.key);
-      std::sort(keys.begin(), keys.end(), [](double a, double b) { return a > b; });
-      const size_t kept_n =
-          B > 0 && static_cast<int>(cs.size()) > B ? static_cast<size_t>(B) : keys.size();
-      const int full = B > 0 && static_cast<int>(cs.size()) > B ? 1 : 0;
-      g_beam_stats.log_prune("Qz", j, keys.size(), kept_n, BeamStats::mass_share(keys, kept_n),
-                             full);
-    }
     if (B > 0 && static_cast<int>(cs.size()) > B) {
       std::nth_element(cs.begin(), cs.begin() + B, cs.end(),
                        [](const Cand& a, const Cand& b) { return a.key > b.key; });
@@ -184,26 +173,6 @@
       acc = run_close(acc, u1, u2, E.s1w[j], E.d3w[j]);
     }
     C[j] = acc;
-    if (c_trace) {
-      double qb = NEG_INF, qp = NEG_INF;
-      const OMap& atb = Qb_at[j];
-      for (size_t r = 0; r < atb.slots(); ++r) {
-        int i = atb.keys[r];
-        if (i < 0 || !E.end_ok(i, j)) continue;
-        double left = (i == 0) ? 0.0 : C[i - 1];
-        if (left > HALF_NEG) qb = log_add(qb, left + atb.vals[r] + E.at(i, j));
-      }
-      if (allow_pk) {
-        const OMap& atp = Qp_at[j];
-        for (size_t r = 0; r < atp.slots(); ++r) {
-          int i = atp.keys[r];
-          if (i < 0) continue;
-          double left = (i == 0) ? 0.0 : C[i - 1];
-          if (left > HALF_NEG) qp = log_add(qp, left + atp.vals[r] + E.w_beta1);
-        }
-      }
-      std::fprintf(stderr, "[c] %d %.17g %.17g %.17g\n", j, C[j], qb, qp);
-    }
   }
 
   // ============================================================= outside

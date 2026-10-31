@@ -9,12 +9,6 @@
     if (n == 0 || outside_done) return;
     outside_done = true;
     alloc_beta();
-    if (lsp_rec)
-      for (auto& v : QpS) v.assign(static_cast<size_t>(n) * n, NEG_INF);
-    if (keep_closed_b && dz) {
-      QmC_b.init(n);
-      Qm2C_b.init(n);
-    }
     for (int j = n - 1; j >= 0; --j) {
       if (allow_pk && l2r_mode == 1) l2r_back_end(j);
       outside_from_future(j);
@@ -39,10 +33,8 @@
         run_back(PKM_b[ix(j, d)], nx.U1.get(d), nx.U2.get(d), j, w3, bP, b1, b2);
         cu.U1.put(d, b1);
         cu.U2.put(d, b2);
-        if (keep_runs) run_weight(RS_PKM, d, j, bP, b1, b2);
         if (Qp_at[j].has(d)) {
           add2b(Qp_b, d, j, bP);
-          qps(1, d, j, bP);
         }
       }
     } else if (allow_pk) {
@@ -54,7 +46,6 @@
         if (pb < HALF_NEG) continue;
         if (Qp_at[j].has(d)) {
           add2b(Qp_b, d, j, pb);
-          qps(1, d, j, pb);
         }
         if (j > 0 && PKM_at[j - 1].has(d))
           PKM_b[ix(j - 1, d)] = log_add(static_cast<double>(PKM_b[ix(j - 1, d)]), pb + w3);
@@ -240,7 +231,6 @@
         double qp = at.vals[r];
         double left_a = (i == 0) ? 0.0 : C[i - 1];
         add2b(Qp_b, i, j, cb + left_a + E.w_beta1);
-        qps(0, i, j, cb + left_a + E.w_beta1);
         if (i > 0) C_b[i - 1] = log_add(C_b[i - 1], cb + qp + E.w_beta1);
       }
     }
@@ -274,16 +264,9 @@
     }
 
     if (dz) {
-      if (keep_closed_b) {
-        for (size_t r = 0; r < Qm_at[j].slots(); ++r)
-          if (Qm_at[j].keys[r] >= 0) QmC_b[ix(Qm_at[j].keys[r], j)] = Qm_b[ix(Qm_at[j].keys[r], j)];
-        for (size_t r = 0; r < Qm2_at[j].slots(); ++r)
-          if (Qm2_at[j].keys[r] >= 0)
-            Qm2C_b[ix(Qm2_at[j].keys[r], j)] = Qm2_b[ix(Qm2_at[j].keys[r], j)];
-      }
-      run_back_at(Qm_b, Qm_at[j], j, w3, rbQm, RS_QM);
-      run_back_at(Qm2_b, Qm2_at[j], j, w3, rbQm2, RS_QM2);
-      if (allow_pk && E.stem_ml) run_back_at(Qmp_b, Qmp_at[j], j, E.w_cp, rbQmp, RS_QMP);
+      run_back_at(Qm_b, Qm_at[j], j, w3, rbQm);
+      run_back_at(Qm2_b, Qm2_at[j], j, w3, rbQm2);
+      if (allow_pk && E.stem_ml) run_back_at(Qmp_b, Qmp_at[j], j, E.w_cp, rbQmp);
     }
 
     // Pass 1 E3 lands on the branch-ending outside, after the run split.
@@ -306,7 +289,6 @@
         }
         double mb = Qm_b[ix(i, j)];
         add2b(obj_beta, d, j, mb + w);
-        if (pk) qps(1, d, j, mb + w);
       }
       if (d == 0) return;
       double w_more = w_single_base;
@@ -317,7 +299,6 @@
         double qm = amd.vals[r];
         double mb = Qm_b[ix(i, j)];
         add2b(obj_beta, d, j, mb + qm + w_more);
-        if (pk) qps(1, d, j, mb + qm + w_more);
         add2b(Qm_b, i, d - 1, mb + obj_a + w_more);
         if (!pk) {
           double m2b = Qm2_b[ix(i, j)];
@@ -356,11 +337,9 @@
           double mb = Qmp_b[ix(i, j)];
           if (dz) {
             add2b(obj_beta, d, j, mb + w_single + cp * (d - i) + E.run(i, d - 1));
-            if (pk) qps(1, d, j, mb + w_single + cp * (d - i) + E.run(i, d - 1));
             continue;
           }
           add2b(obj_beta, d, j, mb + w_single + cp * (d - i));
-          if (pk) qps(1, d, j, mb + w_single + cp * (d - i));
         }
         if (d == 0) return;
         const OMap& amd = Qmp_at[d - 1];
@@ -370,7 +349,6 @@
           double qm = amd.vals[r];
           double mb = Qmp_b[ix(i, j)];
           add2b(obj_beta, d, j, mb + qm + w_single);
-          if (pk) qps(1, d, j, mb + qm + w_single);
           add2b(Qmp_b, i, d - 1, mb + obj_a + w_single);
         }
       };
@@ -411,7 +389,6 @@
           double left_a = (d == i) ? 0.0 : Qz[ix(i, d - 1)];
           double w = E.w_beta1p + E.nest_pk_k * E.w_nest;
           add2b(Qp_b, d, j, zb + left_a + w);
-          qps(2, d, j, zb + left_a + w);
           if (d > i) add2b(Qz_b, i, d - 1, zb + qp + w);
         }
       }

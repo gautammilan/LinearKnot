@@ -47,14 +47,8 @@
     return ml_lead_cap <= 0 || gap <= ml_lead_cap - 1;
   }
   int lead_span() const { return ml_lead_cap <= 0 ? n + 1 : ml_lead_cap; }
-  // Lazy left unpaired run. Off: the old window of `cap` bases (x-1-cap). On
-  // (--lazy-ml-cap): the pass-2 leading run, i >= branch - ml_lead_cap.
-  int ml_run_lo(int branch) const {
-    return lazy_ml_cap ? lead_i_lo(branch) : std::max(0, branch - 1 - cap);
-  }
-  bool ml_run_ok(int gap) const {
-    return lazy_ml_cap ? lead_gap_ok(gap) : gap <= cap;
-  }
+  // Left unpaired run: the window of `cap` bases (x-1-cap).
+  int ml_run_lo(int branch) const { return std::max(0, branch - 1 - cap); }
   void lp_beam(OMap& at) {
     const int B = tbeam[BT_QB];
     if (B <= 0 || at.live <= B) return;
@@ -63,7 +57,7 @@
     for (size_t r = 0; r < at.slots(); ++r) {
       const int i = at.keys[r];
       if (i < 0) continue;
-      const double s = pre_key_inside ? at.vals[r] : prefix_log(i) + at.vals[r];
+      const double s = prefix_log(i) + at.vals[r];
       ranked.emplace_back(s, i);
     }
     std::sort(ranked.begin(), ranked.end(), [](const std::pair<double, int>& a, const std::pair<double, int>& b) {
@@ -132,7 +126,7 @@
       const int k = at.keys[r];
       if (k < 0) continue;
       const int p = k / 3;
-      const double s = pre_key_inside ? at.vals[r] : prefix_log(p) + at.vals[r];
+      const double s = prefix_log(p) + at.vals[r];
       ranked.push_back({s, k, p, k % 3});
     }
     std::sort(ranked.begin(), ranked.end(), [](const R& a, const R& b) {

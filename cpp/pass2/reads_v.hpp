@@ -13,14 +13,6 @@
     if (p2_v_cap > 0 && static_cast<int>(it->second.size()) >= p2_v_cap) return 1;
     return 2;
   }
-  double v_cut_fb_mu(int x, int y, int xs) const {
-    if (!stem_) return NEG_INF;
-    auto ft = stem_->prMuFloor.find(key2(x, y));
-    if (ft == stem_->prMuFloor.end()) return NEG_INF;
-    const double c = (xs > 0 && !stem_->prC.empty()) ? stem_->prC[static_cast<size_t>(xs - 1)] : 0.0;
-    if (c < HALF_NEG) return NEG_INF;
-    return ft->second - c;
-  }
   void note_kind(long long* a, long long* b, long long* c, int st, int k) {
     if (st < 0 || st >= ST_N) return;
     if (k == 1) ++a[st];
@@ -89,7 +81,7 @@
     const auto rfv_t0 = std::chrono::steady_clock::now();
     const StemEst& st = *stem_;
     std::vector<ChainNbr> nb;
-    pr_steps(x, y, inner, false, nb, pr_fast < 2 || pr_vmlsteps);
+    pr_steps(x, y, inner, false, nb, pr_fast < 2);
     const double self = E.end_ok(x, y) ? E.at(x, y) + E.w_beta1 + st.prS[y + 1] : NEG_INF;
     static const PProf empty;
     auto child = [&](int a, int b) -> const PProf* {
@@ -122,158 +114,13 @@
     rfv_sec += std::chrono::duration<double>(std::chrono::steady_clock::now() - rfv_t0).count();
     return prVod.emplace(key, std::move(o)).first->second.span();
   }
-  // --v-sweep: mu[b] of pair x.y. Missing b: --v-cut-fb uses kappa_min/C_pre(b-1) on a
-  // full map; --v-floor uses the smallest kept mu or 0; else -inf.
-  void mu_dump_lazy(const std::unordered_map<uint64_t, PProf>& V) const {
-    if (g_mu_dump.empty()) return;
-    std::ofstream md(g_mu_dump);
-    for (const auto& kv : V) {
-      const int x = k_hi(kv.first), y = k_lo(kv.first);
-      std::unordered_map<int, double> grp;
-      for (size_t i = 0; i < kv.second.k.size(); ++i) {
-        if (!(kv.second.w[i] > HALF_NEG)) continue;
-        const int b = k_hi(kv.second.k[i]);
-        auto it = grp.find(b);
-        if (it == grp.end()) grp.emplace(b, kv.second.w[i]);
-        else it->second = log_add(it->second, kv.second.w[i]);
-      }
-      for (const auto& g : grp) md << "V " << x << " " << y << " " << g.first << " " << g.second << "\n";
-    }
-  }
-  static const char* trace_edge(int t, int trail) {
-    if (t == 0) return "E3 interior";
-    if (t == 1) return trail == 0 ? "E6 branch-qm-pair" : "E7 branch-qm-tail";
-    if (t == 2) return "E5 branch1";
-    return trail == 0 ? "E8 branch-qm2-pair" : "E8 branch-qm2-tail";
-  }
-  void trace_v(int x, int y, int b, const std::unordered_map<uint64_t, PProf>& V,
-               std::ostream& o) const {
-    auto at = [&](int px, int py, int pb, double& val) {
-      val = NEG_INF;
-      auto it = V.find(key2(px, py));
-      if (it == V.end()) return;
-      for (size_t i = 0; i < it->second.k.size(); ++i)
-        if (k_hi(it->second.k[i]) == pb && it->second.w[i] > HALF_NEG)
-          val = log_add(val, it->second.w[i]);
-    };
-    o << "TRACE " << x << " " << y << " " << b << "\n";
-    int cx = x, cy = y;
-    std::vector<ChainNbr> nb;
-    for (int hop = 0; hop < n; ++hop) {
-      if (cx == b) {
-        o << "  step " << hop << " born " << cx << " " << cy
-          << " edge V-seed/E4 exterior lead 0 trail 0 pk none\n";
-        return;
-      }
-      pr_steps(cx, cy, false, false, nb, true);
-      int bx = -1, by = -1, bt = -1, bl = 0, br = 0;
-      double bw = NEG_INF;
-      for (const ChainNbr& t : nb) {
-        double cv = NEG_INF;
-        if (t.x != b) at(t.x, t.y, b, cv);
-        if (t.x != b && !(cv > HALF_NEG)) continue;
-        const double s = t.w + (cv > HALF_NEG ? cv : 0.0);
-        if (!(s > bw)) continue;
-        bw = s;
-        bx = t.x;
-        by = t.y;
-        bt = t.t;
-        bl = cx - t.x - 1;
-        br = t.y - cy - 1;
-      }
-      if (bx < 0) {
-        o << "  step " << hop << " no-parent " << cx << " " << cy << "\n";
-        return;
-      }
-      const char* side = bt == 0 ? "interior" : bt == 1 ? "branch-left" : bt == 2 ? "branch-right" : "branch-both";
-      o << "  step " << hop << " " << cx << " " << cy << " -> " << bx << " " << by << " " << side
-        << " l1 " << (bt == 0 ? bl : 0) << " l2 " << (bt == 0 ? br : 0) << " lead "
-        << (bt == 2 || bt == 3 ? bl : 0) << " trail " << (bt == 1 || bt == 3 ? br : 0)
-        << " edge " << trace_edge(bt, bt == 1 || bt == 3 ? br : 0) << " pk none\n";
-      cx = bx;
-      cy = by;
-    }
-  }
-  void vquery_dump(const std::unordered_map<uint64_t, PProf>& V) const {
-    if (g_vquery_out.empty()) return;
-    std::ofstream out(g_vquery_out);
-    auto at_b = [&](const PProf& p, int b, double& val, double& mx) {
-      val = NEG_INF;
-      mx = NEG_INF;
-      std::unordered_map<int, double> grp;
-      grp.reserve(p.k.size() * 2 + 1);
-      for (size_t i = 0; i < p.k.size(); ++i) {
-        if (!(p.w[i] > HALF_NEG)) continue;
-        const int xs = k_hi(p.k[i]);
-        auto it = grp.find(xs);
-        if (it == grp.end()) grp.emplace(xs, p.w[i]);
-        else it->second = log_add(it->second, p.w[i]);
-      }
-      for (const auto& kv : grp) {
-        if (kv.second > mx) mx = kv.second;
-        if (kv.first == b) val = kv.second;
-      }
-    };
-    std::ofstream tr;
-    if (!g_vtrace_path.empty()) tr.open(g_vtrace_path);
-    for (const VQ& q : g_vquery) {
-      if (q.b >= 0) {
-        double val = NEG_INF, mx = NEG_INF;
-        auto it = V.find(key2(q.x, q.y));
-        if (it != V.end()) at_b(it->second, q.b, val, mx);
-        out << (q.tag == 1 ? "K " : "V ") << q.st << " " << q.x << " " << q.y << " " << q.b
-            << " " << val << " " << mx << "\n";
-        if (tr.is_open() && val > HALF_NEG) trace_v(q.x, q.y, q.b, V, tr);
-        continue;
-      }
-      double best = NEG_INF, best_mx = NEG_INF;
-      int nz = 0, maps = 0;
-      for (const auto& kv : V) {
-        if (k_hi(kv.first) != q.x || k_lo(kv.first) <= q.y) continue;
-        ++maps;
-        double val = NEG_INF, mx = NEG_INF;
-        at_b(kv.second, -1, val, mx);
-        if (mx > HALF_NEG) {
-          ++nz;
-          if (mx > best) {
-            best = mx;
-            best_mx = mx;
-          }
-        }
-      }
-      out << "H " << q.st << " " << q.x << " " << q.y << " " << maps << " " << nz << " " << best
-          << " " << best_mx << "\n";
-    }
-  }
-  void miss_k(int r, int qp, int st) {
-    if (g_miss_cap <= 0 || (st != ST_P3 && st != ST_S)) return;
-    if (r < 0 || qp + 1 > n - 1 || prArmY0.empty()) return;
-    const int xs = prArmXs[r], xp = prArmXp[r], hi = prArmY0[r + 1];
-    const int* yy = prYy.data();
-    const int k = static_cast<int>(std::upper_bound(yy + prArmY0[r], yy + hi, qp) - yy);
-    if (k >= hi || v_map_kind(xp, yy[k], xs) != 2) return;
-    miss_take(1, st, xp, yy[k], xs);
-  }
   double mu_at(int x, int y, int xs, int st = -1) {
     const int kind = v_map_kind(x, y, xs);
-    if (kind == 2) miss_take(0, st, x, y, xs);
     if (kind == 0) {
       auto it = stem_->prMu.find(key2(x, y));
       return it->second.find(key2(xs, 0))->second;
     }
     note_kind(vm_i, vm_ii, vm_iii, st, kind);
-    if (p2_v_cut_fb && kind == 1) {
-      const double fb = v_cut_fb_mu(x, y, xs);
-      if (fb > HALF_NEG) {
-        ++vfb_n;
-        return fb;
-      }
-    }
-    if (p2_v_floor == 2) return 0.0;
-    if (p2_v_floor == 1) {
-      auto ft = stem_->prMuFloor.find(key2(x, y));
-      return ft == stem_->prMuFloor.end() ? NEG_INF : ft->second;
-    }
     return NEG_INF;
   }
   // V of the root x.y (seed: x.y is the stem's inner pair) at the outer left end xs

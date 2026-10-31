@@ -1,4 +1,5 @@
-// Memory accounting: log_nest, state counts, *_sz byte estimates and mem_items (--mem-log).
+// Memory accounting: log_nest ([nest] lines), state counts, *_sz byte estimates and mem_items
+// ([mem-nt] line).
 //
 // Fragment of the unity build: #included by cpp/main.cpp at this point of the original
 // file (inside namespace / class DP03 / main() as main.cpp shows); not a standalone header.
@@ -16,31 +17,6 @@
                  "qz_mb %.3f\n",
                  tag, n, nn, oml(Qb_at), oml(Qm_at), oml(Qm2_at), oml(Qp_at), oml(Qmp_at),
                  Qz.finite(), static_cast<double>(Qz.bytes()) / 1048576.0);
-  }
-
-  // pr_Mbar and pr_QbIn are built later, inside the principled pass. Time and size them
-  // here so the pass-1 peak above this call does not include the two dense copies.
-  void log_pr_side() const {
-    const auto t0 = std::chrono::steady_clock::now();
-    const std::vector<double> qbin = Qb.dense();
-    const double tq = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-    const auto t1 = std::chrono::steady_clock::now();
-    std::vector<double> mb(static_cast<size_t>(n) * static_cast<size_t>(n), NEG_INF);
-    long long nz = 0;
-    for (int j = 0; j < n; ++j) {
-      const OMap& at = qmp_at(j);
-      for (size_t r = 0; r < at.slots(); ++r) {
-        const int i = at.keys[r];
-        if (i < 0) continue;
-        mb[static_cast<size_t>(i) * static_cast<size_t>(n) + static_cast<size_t>(j)] = at.vals[r];
-        ++nz;
-      }
-    }
-    const double tm = std::chrono::duration<double>(std::chrono::steady_clock::now() - t1).count();
-    std::fprintf(stderr,
-                 "[pr-side] qbin_s %.6f qbin_mb %.1f mbar_s %.6f mbar_mb %.1f mbar_nz %lld\n",
-                 tq, static_cast<double>(qbin.size()) * 8.0 / 1048576.0, tm,
-                 static_cast<double>(mb.size()) * 8.0 / 1048576.0, nz);
   }
 
   std::vector<long long> l2r_states() const {
@@ -63,7 +39,7 @@
     return c;
   }
 
-  // --mem-log: per structure entries and bytes (MemItem).  tabs: the engine tables (inside
+  // Per structure entries and bytes (MemItem).  tabs: the engine tables (inside
   // dense + kept maps, outside, b16 4-index); pk: V / arms, K, growth, l2r tables, caches.
   static void tab4_sz(const std::vector<Tab4>& v, long long& e, double& b) {
     b += msz::vec(v);
@@ -125,7 +101,6 @@
       long long e = Qz.finite();
       double b = Qz.bytes() + msz::vec(C);
       for (int k = 0; k < 2; ++k) b += msz::vec(zP[k]) + msz::vec(zU1[k]) + msz::vec(zU2[k]);
-      for (int r = 0; r < RS_N; ++r) b += msz::vec(runP[r]) + msz::vec(runU1[r]) + msz::vec(runU2[r]) + msz::vec(runW[r]);
       for (const std::vector<OMap>* v : {&Qb_at, &Qm_at, &Qm2_at, &Qp_at, &Qmp_at, &PKM_at}) omap_sz(*v, e, b);
       out.push_back({pre + "in", e, b});
       e = 0;
@@ -134,10 +109,6 @@
       for (const SpMat* v : {&Qb_b, &Qm_b, &Qm2_b, &Qp_b, &PKM_b, &Qmp_b, &QmC_b, &Qm2C_b}) {
         e += v->finite();
         b += v->bytes();
-      }
-      for (const std::vector<double>* v : {&QpS[0], &QpS[1], &QpS[2]}) {
-        e += msz::fin(*v);
-        b += msz::vec(*v);
       }
       for (int k = 0; k < 2; ++k) b += msz::vec(bz1[k]) + msz::vec(bz2[k]);
       out.push_back({pre + "out", e, b});
@@ -200,12 +171,6 @@
       b += msz::vec(m.keys) + msz::vec(m.v) + msz::umap(m.idx);
     }
     out.push_back({"l2r_tab", e, b});
-    if (rlt) {
-      e = 0;
-      b = 0.0;
-      for (const LFam* F : {&LA, &LB}) tab4_sz(F->Glt, e, b);
-      out.push_back({"l2r_tail", e, b});
-    }
     if (l2r_inc) {
       e = 0;
       b = 0.0;
@@ -225,13 +190,6 @@
       }
       out.push_back({"l2r_H", e, b});
     }
-    e = 0;
-    b = msz::vec2(spG) + msz::vec2(spCol) + msz::vec2(spRow) + msz::vec(spWmax);
-    out.push_back({"spawn", static_cast<long long>(sp_row_ents), b});
-    e = 0;
-    b = msz::vec2(lWr) + msz::vec2(lWx) + msz::umap(lKbr) + msz::umap(lKbx) + msz::umap(lFb) +
-        msz::umap(lKc) + msz::umap(lOU) + msz::umap(lOUs);
-    out.push_back({"l2r_ctx", static_cast<long long>(lKbr.size() + lKbx.size()), b});
     e = 0;
     b = pmap_sz(prG, e) + pmap_sz(prGR, e) + pmap_sz(prHg, e) + pmap_sz(prGRs, e) + pmap_sz(prKls, e) +
         pmap_sz(prKrs, e);
@@ -268,11 +226,10 @@
     e = 0;
     b = msz::umap(stA) + msz::umap(stE) + msz::umap(stBc) + msz::umap(stBgc) + vmap_sz(stX, e) +
         msz::umap(stHc) + msz::umap(stOc) + profmap_sz(stP, e) + profmap_sz(stPg, e) + profmap_sz(stPls, e) +
-        profmap_sz(stPrs, e) + vmap_sz(arm_cache, e) + msz::umap(stM);
+        profmap_sz(stPrs, e);
     out.push_back({"b16_stem", e, b});
     e = 0;
-    b = profmap_sz(chM, e) + profmap_sz(chR, e) + vmap_sz(chPaths, e) + vmap_sz(prnG, e) + vmap_sz(prnV, e) +
-        msz::umap(prSc) + msz::umap(prAc);
+    b = profmap_sz(chM, e) + profmap_sz(chR, e) + msz::umap(prSc) + msz::umap(prAc);
     out.push_back({"b16_chain_naive", e, b});
   }
 

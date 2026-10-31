@@ -3,7 +3,7 @@
 // Fragment of the unity build: #included by cpp/main.cpp at this point of the original
 // file (inside namespace / class DP03 / main() as main.cpp shows); not a standalone header.
 
-// --l2r-p1 time split: process CPU seconds and peak RSS so far.
+// Process CPU seconds and peak RSS so far.
 static double cpu_sec() { return static_cast<double>(std::clock()) / CLOCKS_PER_SEC; }
 static double ru_cpu() {
   struct rusage ru;

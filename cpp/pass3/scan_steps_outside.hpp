@@ -4,37 +4,6 @@
 // Fragment of the unity build: #included by cpp/main.cpp at this point of the original
 // file (inside namespace / class DP03 / main() as main.cpp shows); not a standalone header.
 
-  // Pseudoknot part of step j (after the engine's Qg .. Qp in check mode).
-  // Qhat^Lead(x0, t): empty at x0 == t, else w_cp per base plus the dangle of the whole run.
-  // Beam b2 per column, key C(x0-1) + Lead. A dropped start is NEG_INF.
-  void l2r_lead(int t) {
-    LeadCol col;
-    col.w.assign(static_cast<size_t>(t) + 1, NEG_INF);
-    struct Cand {
-      int x0;
-      double w, k;
-    };
-    std::vector<Cand> cs;
-    cs.reserve(static_cast<size_t>(t) + 1);
-    for (int x0 = 0; x0 <= t; ++x0) {
-      if (!lead_gap_ok(t - x0)) continue;
-      double w = 0.0;
-      if (x0 < t) {
-        w = E.w_cp * (t - x0);
-        if (dz) w += E.run(x0 + 1, t);
-      }
-      cs.push_back(Cand{x0, w, prefix_log(x0) + w});
-    }
-    int b = tbeam[BT_QM];
-    if (b > 0 && static_cast<int>(cs.size()) > b) {
-      std::nth_element(cs.begin(), cs.begin() + b, cs.end(),
-                       [](const Cand& a, const Cand& c) { return a.k > c.k; });
-      cs.resize(static_cast<size_t>(b));
-    }
-    for (const Cand& c : cs) col.w[static_cast<size_t>(c.x0)] = c.w;
-    gs_lead += static_cast<long long>(cs.size());
-    gsLead[static_cast<size_t>(t)] = std::move(col);
-  }
 
   // M1 and M4 from the stems kept at j. M3 records each M4 state as an M as well.
   // M4's group key is the carried v. Unpaired bases inside Qhat^M are already in that table.
@@ -263,17 +232,9 @@
       if (l2r_inc) l2r_inc_seed(j);
       else l2r_spawn(j);
     }
-    if (l2r_inc_check) {
-      SecTimer t(l2r_sec[5]);
-      l2r_inc_check_step(j);
-    }
     l2r_pruneA(LA.G[j], PT_R, 0, false, j);
     l2r_pruneA(LA.Gs[j], PT_RS, 0, true, j);
     l2r_done[LT_AG] = l2r_done[LT_AGS] = j;
-    if (l2r_mode == 2 && l2r_check_R) {
-      SecTimer t(l2r_sec[5]);
-      l2r_checkR(j);
-    }
     {
       SecTimer t(l2r_bsec[PT_RLS]);
       l2r_ls(LA, j);
@@ -306,10 +267,6 @@
     {
       SecTimer t(l2r_csec);
       l2r_closeB(j);
-    }
-    if (rlt) {
-      l2r_tail(LA, j);
-      l2r_tail(LB, j);
     }
   }
 
@@ -388,7 +345,6 @@
         const double bp = cur.v[c].bP;
         o.bF = log_add(o.bF, bp + qv + bw);
         add2b(qb, d, j, bp + o.F + bw);
-        if (&qb == &Qp_b) qps(2, d, j, bp + o.F + bw);
       }
     };
     const OMap& atb = Qb_at[j];
@@ -504,9 +460,7 @@
         if (!E.end_ok(xs, j)) continue;
         for (Ent& s : g.ents)
           if (s.p == xs) {
-            const double qpb = lsp_use >= 0 ? QpS[lsp_use][ix(s.u, j)]
-                                            : static_cast<double>(Qp_b[ix(s.u, j)]);
-            add4(s, qpb + E.at(xs, j));
+            add4(s, static_cast<double>(Qp_b[ix(s.u, j)]) + E.at(xs, j));
           }
       }
     }
@@ -525,10 +479,6 @@
   // At the engine's Qp adjoint (Qp outside at j final): close B, U side, B seeds, close A, R side.
   void l2r_back_pk(int j) {
     l2r_adj = true;
-    if (rlt) {
-      l2r_tail_back(LB, j);
-      l2r_tail_back(LA, j);
-    }
     l2r_closeB_back(j);
     l2r_ls(LB, j);
     l2r_grow(LB, j);

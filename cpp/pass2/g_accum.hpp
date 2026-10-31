@@ -1,5 +1,5 @@
 // Pass 2, G accumulators: racc_* (per state, then the b_G cut in racc_finish_trunc / ntr_init),
-// and the rec_* growth recursion (--grow-rec on: rec_helper, rec_node, rec_gbuild).
+// and the rec_* growth recursion (rec_helper, rec_node, rec_gbuild).
 //
 // Fragment of the unity build: #included by cpp/main.cpp at this point of the original
 // file (inside namespace / class DP03 / main() as main.cpp shows); not a standalone header.
@@ -42,8 +42,6 @@
   std::vector<double> rA[6];
   double rRef[6];
   int rLo[6], rHi[6];
-  std::vector<int> rTouch[6];
-  bool rSparse = false;
   struct RTerm {
     const RN* c;
     double w;
@@ -52,13 +50,11 @@
   std::vector<RTerm> rTerms;
   double rSelfR = NEG_INF;  // --grow-r-from-v: the node's own R stop (log)
   void racc_begin() {
-    rSparse = g_ntr_K > 0 && (p2_g_cap > 0 || p2_g_mode > 0 || p2_g_eager);
     for (int s = 0; s < 6; ++s) {
       if (rA[s].size() < static_cast<size_t>(n)) rA[s].assign(n, 0.0);
       rRef[s] = NEG_INF;
       rLo[s] = n;
       rHi[s] = -1;
-      if (rSparse) rTouch[s].clear();
     }
     rSelfR = NEG_INF;
   }
@@ -67,14 +63,12 @@
   static int rdst(int m, int sh) { return sh ? std::min(m + 1, 2) : m; }
   // Eager growth freezes the prefix at C_pre. Lazy (the default) uses the scan's C.
   double g_pref(int x) const {
-    if (p2_g_eager && stem_ && !stem_->prC.empty())
-      return x > 0 ? stem_->prC[static_cast<size_t>(x - 1)] : 0.0;
     return prefix_log(x);
   }
   void racc_self(int x, int y, double at) {
     const StemEst& st = *stem_;
     const double px = g_pref(x);
-    rRef[0] = std::max(rRef[0], at + (lLam.empty() ? px : px + lLam[x]));
+    rRef[0] = std::max(rRef[0], at + px);
     if (g_rfv) return;
     rRef[3] = std::max(rRef[3], at + E.w_beta1 + st.prS[y + 1]);
   }
@@ -104,13 +98,12 @@
     const StemEst& st = *stem_;
     auto put = [&](int s, int i, double w) {
       if (w < HALF_NEG || rRef[s] < HALF_NEG) return;
-      if (rSparse && rA[s][i] == 0.0) rTouch[s].push_back(i);
       rA[s][i] += std::exp(w - rRef[s]);
       rLo[s] = std::min(rLo[s], i);
       rHi[s] = std::max(rHi[s], i);
     };
     const double px = g_pref(x);
-    put(0, y, at + (lLam.empty() ? px : px + lLam[x]));
+    put(0, y, at + px);
     if (g_rfv) {
       rSelfR = at + E.w_beta1 + st.prS[y + 1];
       return;
@@ -130,10 +123,6 @@
             if (sc == 0.0) continue;
             double* d = rA[s].data() + a.lo;
             for (size_t i = 0; i < a.v.size(); ++i) d[i] += sc * a.v[i];
-            if (rSparse)
-              for (size_t i = 0; i < a.v.size(); ++i)
-                if (a.v[i] != 0.0) rTouch[s].push_back(a.lo + static_cast<int>(i));
-            if (lpf) lpf_racc_dense += static_cast<long long>(a.v.size());
             rLo[s] = std::min(rLo[s], a.lo);
             rHi[s] = std::max(rHi[s], a.lo + static_cast<int>(a.v.size()) - 1);
             continue;
@@ -141,7 +130,6 @@
           for (const auto& [i, g] : t.c->T[side]) {
             const double v = std::exp((t.w + g) - rRef[s]);
             if (v == 0.0) continue;
-            if (rSparse && rA[s][i] == 0.0) rTouch[s].push_back(i);
             rA[s][i] += v;
             rLo[s] = std::min(rLo[s], i);
             rHi[s] = std::max(rHi[s], i);
@@ -166,7 +154,7 @@
           rHi[s] = std::max(rHi[s], a.lo + static_cast<int>(len) - 1);
         }
   }
-  // --grow-node-trunc ranking (static): L entry q' by g uL(q'), uL(q') = sum over the V groups
+  // --bG ranking (static): L entry q' by g uL(q'), uL(q') = sum over the V groups
   // (arm r, y' > q') of Qzbar(0, y'-1) prYw / Qz[xs][x'] / Qzbar(0, q') (tr_uL with the
   // separable fill); entries with uL = 0 dropped (no arm's lK is nonzero there).  R entry p'
   // by g, the p' that are some arm's xs first (lsc_R reads R at an arm's xs).
@@ -181,9 +169,7 @@
   std::vector<NE> ntrE;
   int ntr_first_j = -2;
   long long ntr_arm_skip = 0;
-  // --l2r-qz-audit on: reads of the scan's Qz past the filled column, total and via pr_qz
-  bool qz_audit = false, qz_audit_req = false;
-  mutable long long qz_unf = 0, qz_unf_pr = 0, qz_reads = 0;
+  mutable long long qz_reads = 0;
   void ntr_init() {
     if (!ntrUL.empty()) return;
     const StemEst& st = *stem_;
@@ -194,7 +180,7 @@
       const int xs = prArmXs[r], xp = prArmXp[r];
       double iz = NEG_INF;
       if (xs >= 1) {
-        if (g_ntr_zbar && !pr_qz_unp) {
+        if (g_ntr_zbar) {
           const double z = st.Qzbar(xs, xp);
           if (z > HALF_NEG) iz = (prKap[xs - 1] + prKap[xp]) - z;
         } else {
@@ -252,10 +238,7 @@
           const double g = rRef[s] + std::log(a[i]);
           tot = log_add(tot, g);
           if (side == 0) {
-            if (p2_g_suffix) {
-              const double sb = stem_->prS[static_cast<size_t>(i + 1)];
-              if (sb > HALF_NEG) ntrE.push_back({i, g, g + sb});
-            } else if (ntrUL[i] > HALF_NEG) {
+            if (ntrUL[i] > HALF_NEG) {
               ntrE.push_back({i, g, g + ntrUL[i]});
             }
           } else {
@@ -264,14 +247,7 @@
         }
         a[i] = 0.0;
       };
-      if (rSparse) {
-        std::vector<int>& tt = rTouch[s];
-        std::sort(tt.begin(), tt.end());
-        tt.erase(std::unique(tt.begin(), tt.end()), tt.end());
-        for (int i : tt) one(i);
-      } else {
-        for (int i = rLo[s]; i <= rHi[s]; ++i) one(i);
-      }
+      for (int i = rLo[s]; i <= rHi[s]; ++i) one(i);
       ntr_in[side] += static_cast<long long>(ntrE.size());
       auto better = [side](const NE& x, const NE& y) {
         if (side == 1 && x.s != y.s) return x.s > y.s;
@@ -312,10 +288,6 @@
   double rv_finish(int s, RV& o) {
     o = RV();
     if (rHi[s] < rLo[s]) return NEG_INF;
-    if (lpf) {
-      ++lpf_racc_n;
-      lpf_racc_fin += rHi[s] - rLo[s] + 1;
-    }
     int lo = rLo[s], hi = rHi[s];
     double* a = rA[s].data();
     while (lo <= hi && a[lo] == 0.0) ++lo;
@@ -338,11 +310,8 @@
   }
   void rec_hg_trim() {
     if (rh_elems - rh_elems0 <= PR_HG_MAX) return;
-    std::unique_ptr<SecTimer> ptm(lpf ? new SecTimer(lpf_hg_sec) : nullptr);
-    if (lpf) ++lpf_hg_clears;
     prRH.clear();
     {
-      std::unique_ptr<SecTimer> mtm(lpf ? new SecTimer(lpf_mtrim_sec) : nullptr);
       mtrim();
     }
     rh_elems0 = rh_elems;
@@ -362,9 +331,7 @@
   // terms of the helper (xo, y, kind) after its --grow-ml-c cut
   void rec_helper_terms(int xo, int y, int kind, std::vector<RTerm>& t, long long& drop) {
     const StemEst& st = *stem_;
-    // Pair set P when --g-pairs is on. Flags off keeps prKeptRight, the current list.
-    const std::vector<int>& kr =
-        (p2_g_mode > 0 ? st.prKeptRightG[xo] : st.prKeptRight[xo]);
+    const std::vector<int>& kr = st.prKeptRight[xo];
     const int S = pr_ml_span;
     auto close = [&](int a, int b) { return (E.w_ap + E.w_bp + E.at(a, b)) + pair_bonus; };
     t.clear();
@@ -384,44 +351,7 @@
       if (mb < HALF_NEG || !E.end_ok(xo, yo)) continue;
       t.push_back({&prRG.find(key2(xo, yo))->second, mb + close(xo, yo), 0});
     }
-    if (prof_on) prof_help_steps += static_cast<long long>(t.size());
     rec_topc(t, 0, drop);
-  }
-  bool g_in_set(int x, int y) const {
-    if (p2_g_mode <= 0 || !stem_ || x < 0 || x >= n) return true;
-    const std::vector<int>& kr = stem_->prKeptRightG[static_cast<size_t>(x)];
-    return std::binary_search(kr.begin(), kr.end(), y);
-  }
-  // One enclosing pair in P, the nearest left end that has a right end past y.
-  void g_one_step(int x, int y, std::vector<ChainNbr>& nb) const {
-    if (!stem_ || p2_g_mode <= 0) return;
-    const StemEst& st = *stem_;
-    const std::vector<std::vector<int>>& KR = st.prKeptRightG;
-    for (int xo = x - 1; xo >= 0; --xo) {
-      const std::vector<int>& kr = KR[static_cast<size_t>(xo)];
-      auto it = std::upper_bound(kr.begin(), kr.end(), y);
-      if (it == kr.end()) continue;
-      const int yo = *it;
-      const int gapL = x - xo - 1, gapR = yo - y - 1;
-      if (gapL + gapR <= cap) {
-        const double s = E.stem_interior(xo, x, y, yo);
-        if (s > HALF_NEG) {
-          nb.push_back({xo, yo, 0, s + pair_bonus});
-          return;
-        }
-      }
-      if (E.end_ok(x, y) && E.end_ok(xo, yo) && gapR <= pr_ml_span && y + 1 <= yo - 1) {
-        const double mb = st.PrMbar(y + 1, yo - 1);
-        if (mb > HALF_NEG) {
-          double rl = E.w_cp * gapL;
-          if (dz) rl += E.run(xo + 1, x - 1);
-          const double br = E.w_bp + E.at(x, y);
-          const double close = (E.w_ap + E.w_bp + E.at(xo, yo)) + pair_bonus;
-          nb.push_back({xo, yo, 2, ((mb + br) + rl) + close});
-          return;
-        }
-      }
-    }
   }
   // --grow-ml-ub: log sum over the helper's terms of e^(w + child tot), cached for the run.
   // Bounds the helper's tot from above: the helper adds, per term, the child's T[0] (a subset of
@@ -447,11 +377,6 @@
     const uint64_t key = key3(xo, y, kind);
     auto it = prRH.find(key);
     if (it != prRH.end()) return it->second;
-    std::unique_ptr<SecTimer> ptm(lpf ? new SecTimer(lpf_help_sec) : nullptr);
-    if (lpf) {
-      ++lpf_help_built;
-      if (!lpf_help_keys.insert(key).second) ++lpf_help_rebuilt;
-    }
     std::vector<RTerm> t;
     rec_helper_terms(xo, y, kind, t, rn_mlc_drop_r);
     std::vector<RTerm> keep;
@@ -526,13 +451,8 @@
     for (const ChainNbr& t : nb)
       if (t.t == 0) rTerms.push_back({&prRG.find(key2(t.x, t.y))->second, t.w, 0});
     MlSplit s;
-    pr_split(x, y, !geq_pre, s);
+    pr_split(x, y, true, s);
     if (s.on) {
-      if (lpf) {
-        lpf_ml_cand += static_cast<long long>(s.qm.size() + s.lr.size());
-        lpf_ml_max = std::max(lpf_ml_max, static_cast<long long>(s.qm.size() + s.lr.size()));
-        ++lpf_ml_nodes;
-      }
       std::vector<RTerm> ml;
       if (g_ml_ub && g_ml_c > 0 && s.qm.size() + s.lr.size() > static_cast<size_t>(g_ml_c)) rec_ml_ub(y, inner, s, ml);
       else {
@@ -598,8 +518,7 @@
         stk.pop_back();
         continue;
       }
-      pr_steps(a, b, false, !geq_pre, nb);
-      if (nb.empty() && p2_g_fb && p2_g_mode > 0 && !g_in_set(a, b)) g_one_step(a, b, nb);
+      pr_steps(a, b, false, true, nb);
       bool ready = true;
       for (const ChainNbr& t : nb)
         if (!prRG.count(key2(t.x, t.y))) {

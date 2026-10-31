@@ -101,7 +101,7 @@
   // Nested-only run: also fill Qmp (stem_ml), the chain's mbar.  Set before pfunc().
   bool chain_qmp = false;
 
-  // st's --stem-est-chain data from this nested-only run: runs the outside pass; kept pairs
+  // st's arm-chain data from this nested-only run: runs the outside pass; kept pairs
   // have (Qb + Qb outside) - logZ >= log(floor).
   void build_chain(StemEst& st, double floor) {
     outside();
@@ -134,20 +134,17 @@
   }
 
   // Closed-value outsides of Qm / Qm2 with dangles (before run_back_at); set before outside().
-  bool keep_closed_b = false;
   SpMat QmC_b, Qm2C_b;
 
   // st's --stem-est-principled data from this nested-only run (chain_qmp set; runs the outside
-  // pass): prS, prQz, prMbar, kept pairs (P >= floor), prBml; nested: the outsides of Qb / Qm /
-  // Qm2 (closed values).  Bml[d][e] = (sum of
+  // pass): prS, prQz, prMbar, kept pairs (P >= floor), prBml.  Bml[d][e] = (sum of
   //   (a) Qm_b[i][e] w3^(d-i) run(i, d-1)          over cells (i, e), d - i <= ml_left,
   //   (b) Qm_b[i][e] Qm[i][d-1]                     over cells (i, d-1),
   // times alpha2^ml_pk_k: rev_branch's pseudoknot branch) + (c) the PKM closing of every pair
   // i.j' (i < d, j' > e): Qb_b[i][j'] alpha1 alpha2^(1+ml_pk_k) at_close(i, j') w3^(j'-1-e)
   // run(e+1, j'-1) [w3^(d-i-1) run(i+1, d-1) + Qm[i+1][d-1]] (fill_Qb's PKM terms); beta1m
-  // is left to Ctx.  check: every cell recomputed directly (n <= 200).
-  void build_principled(StemEst& st, double floor, bool nested, bool check,
-                        double partner_floor = -1.0) {
+  // is left to Ctx.
+  void build_principled(StemEst& st, double floor, double partner_floor = -1.0) {
     outside();
     const size_t nn = static_cast<size_t>(n) * n;
     st.n = n;
@@ -179,18 +176,12 @@
         S[y] = acc;
       }
     }
-    // --qzbar-old: always dense-copy nested Qz into prQz (snap/incperf), even if qz_beam_fill.
-    if (!qz_beam_fill || qzbar_old) {
+    if (!qz_beam_fill) {
       st.prQz.assign(nn, NEG_INF);
       for (int i = 0; i < n; ++i)
         for (int j = i; j < n; ++j) st.prQz[ix(i, j)] = Qz[ix(i, j)];
-      if (qzbar_old) {
-        st.qz_on = 0;
-        st.qz_col.clear();
-        st.qz_col.shrink_to_fit();
-      }
     }
-    if (!st.skip_qbin) st.prQbIn = Qb.dense();
+    st.prQbIn = Qb.dense();
     st.prMbar.assign(nn, NEG_INF);
     if (p2_sweep) {
       st.prMbarAt.assign(n, {});
@@ -232,22 +223,11 @@
         const auto qb = stat(Qb_at), qm = stat(Qm_at), q2 = stat(Qm2_at);
         std::fprintf(stderr,
                      "[pre-beam] b %d key %s Qb %lld max %d Qm %lld max %d Qm2 %lld max %d\n",
-                     beam, pre_key_inside ? "inside" : "prefix", qb.first, qb.second, qm.first,
+                     beam, "prefix", qb.first, qb.second, qm.first,
                      qm.second, q2.first, q2.second);
       }
     }
-    if (prof_on && !(p2_sweep && beam > 0)) {
-      int qm_max = 0;
-      for (int j = 0; j < n; ++j) {
-        int k = 0;
-        const OMap& at = qmp_at(j);
-        for (size_t r = 0; r < at.slots(); ++r)
-          if (at.keys[r] >= 0) ++k;
-        qm_max = std::max(qm_max, k);
-      }
-      std::fprintf(stderr, "[qm-col] max %d\n", qm_max);
-    }
-    if (!st.skip_kept) st.prKept.assign(nn, 0);
+    st.prKept.assign(nn, 0);
     st.prKeptRight.assign(n, {});
     st.pr_n_kept = 0;
     const double lf = floor > 0.0 ? std::log(floor) : NEG_INF;
@@ -255,7 +235,6 @@
     const double lfp = partner_floor > 0.0 ? std::log(partner_floor) : NEG_INF;
     st.prKeptRightP.assign(st.pr_partner ? n : 0, {});
     st.pr_n_partner = 0;
-    if (st.want_lp) st.prLP.assign(nn, NEG_INF);
     for (int j = 0; j < n; ++j) {
       const OMap& at = Qb_at[j];
       for (size_t r = 0; r < at.slots(); ++r) {
@@ -263,13 +242,12 @@
         if (i < 0) continue;
         const double b = Qb_b[ix(i, j)];
         if (at.vals[r] < HALF_NEG || b < HALF_NEG) continue;
-        if (st.want_lp) st.prLP[ix(i, j)] = at.vals[r] + b - logZ;
         if (st.pr_partner && at.vals[r] + b - logZ >= lfp) {
           st.prKeptRightP[i].push_back(j);
           ++st.pr_n_partner;
         }
         if (at.vals[r] + b - logZ < lf) continue;
-        if (!st.skip_kept) st.prKept[ix(i, j)] = 1;
+        st.prKept[ix(i, j)] = 1;
         st.prKeptRight[i].push_back(j);
         ++st.pr_n_kept;
       }
@@ -278,12 +256,6 @@
     for (std::vector<int>& kr : st.prKeptRightP) std::sort(kr.begin(), kr.end());
     st.prBml.clear();
     if (g_skip_bml) {
-      if (nested) {
-        st.pr_nested = true;
-        st.prQb_b = Qb_b.dense();
-        st.prQm_b = dz ? QmC_b.dense() : Qm_b.dense();
-        st.prQm2_b = dz ? Qm2C_b.dense() : Qm2_b.dense();
-      }
       pass2_apply(st);
       return;
     }
@@ -353,13 +325,6 @@
         st.prBml[ix(d, e)] = log_add(ab > HALF_NEG ? ab + kw : NEG_INF, c);
       }
     }
-    if (nested) {
-      st.pr_nested = true;
-      st.prQb_b = Qb_b.dense();
-      st.prQm_b = dz ? QmC_b.dense() : Qm_b.dense();
-      st.prQm2_b = dz ? Qm2C_b.dense() : Qm2_b.dense();
-    }
-    if (check && n <= 200) bml_check(st);
     pass2_apply(st);
   }
 

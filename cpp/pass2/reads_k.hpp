@@ -17,7 +17,6 @@
     for (int k = static_cast<int>(std::upper_bound(prEy.begin() + prArmE0[r], prEy.begin() + hi, qp) -
                                   prEy.begin());
          k < hi; ++k) {
-      if (pr_pspan > 0 && prEy[k] - qp > pr_pspan) break;
       const double z = st.Qzbar(qp + 1, prEy[k] - 1);
       if (z > HALF_NEG) w.emplace_back(prEys[k], z + prEw[k]);
       ++pr_W_ent;
@@ -87,14 +86,13 @@
         const bool r0 = pr_ratio;
         pr_arms_k = 0;
         pr_ratio = false;
-        pr_select(a, qp, u, v, two, prSel);
+        pr_select(a, u, v, two, prSel);
         pr_arms_k = k0;
         pr_ratio = r0;
       } else {
-        pr_select(a, qp, u, v, two, prSel);
+        pr_select(a, u, v, two, prSel);
       }
       pr_T_arms += static_cast<long long>(prSel.size());
-      if (!prVrg.empty()) pr_vdiag_T(qp, u, v, two, prSel);
       const double gz = xs ? pr_qz(u + 1, v - 1) : 0.0;
       acc_begin();
       for (int r : prSel) {
@@ -244,13 +242,7 @@
     }
     const StemEst& st = *stem_;
     double sl = NEG_INF;
-    if (pr_arms_mode == 1) {
-      const double se = pr_sep_ext(qp, u, v, false);
-      const PrTV& t = pr_T(qp, u, v, false);
-      double bm = NEG_INF;
-      for (size_t k = 0; k < t.ys.size(); ++k) bm = log_add(bm, t.w[k] + st.Bml(pp, t.ys[k]));
-      sl = log_add(prefix_log(pp) + se, E.w_beta1m + bm);
-    } else {
+    {
       const PrTV& t = pr_T(qp, u, v, false);
       if (!t.ys.empty()) {
         double bm = NEG_INF;
@@ -321,34 +313,11 @@
 
   void pr_ub_init() {
     if (!prMBr.empty()) return;
-    const StemEst& st = *stem_;
-    const size_t nn = static_cast<size_t>(n) * n;
     prKap.assign(n + 1, 0.0);
     if (dz)
       for (int b = 0; b + 1 < n; ++b) prKap[b] = std::max(0.0, E.d3w[b] + E.d5w[b + 1]);
-    if (g_U_nobml || g_grow_rec) {
-      prMBr.assign(n, NEG_INF);
-      prMBc.assign(n, NEG_INF);
-      prUR.assign(n, PrUR());
-      return;
-    }
-    prEBr.assign(nn, 0.0L);
-    prEBc.assign(nn, 0.0L);
     prMBr.assign(n, NEG_INF);
     prMBc.assign(n, NEG_INF);
-    for (int d = 0; d < n; ++d)
-      for (int e = 0; e < n; ++e) {
-        const double b = st.Bml(d, e);
-        prMBr[d] = std::max(prMBr[d], b);
-        prMBc[e] = std::max(prMBc[e], b);
-      }
-    for (int d = 0; d < n; ++d)
-      for (int e = 0; e < n; ++e) {
-        const double b = st.Bml(d, e);
-        if (b < HALF_NEG) continue;
-        prEBr[ix(d, e)] = std::exp(static_cast<long double>(b) - prMBr[d]);
-        prEBc[ix(e, d)] = std::exp(static_cast<long double>(b) - prMBc[e]);
-      }
     prUR.assign(n, PrUR());
   }
 
@@ -382,7 +351,6 @@
           for (int k = static_cast<int>(std::upper_bound(prYy.begin() + prArmY0[r], prYy.begin() + hy, qp) -
                                         prYy.begin());
                k < hy; ++k) {
-            if (pr_pspan > 0 && prYy[k] - qp > pr_pspan) break;
             const double zb = st.Qzbar(qp + 1, prYy[k] - 1);
             if (zb < HALF_NEG) continue;
             u.acc = log_add(u.acc, (zb + prYw[k]) + iz);
@@ -394,7 +362,6 @@
         for (int k = static_cast<int>(std::upper_bound(prEy.begin() + prArmE0[r], prEy.begin() + hi, qp) -
                                       prEy.begin());
              k < hi; ++k) {
-          if (pr_pspan > 0 && prEy[k] - qp > pr_pspan) break;
           const double zb = st.Qzbar(qp + 1, prEy[k] - 1);
           if (zb < HALF_NEG) continue;
           double& t = u.w[prEys[k]];
@@ -457,7 +424,7 @@
       const PrUL& u = pr_ul(qp);
       if (u.lmax > HALF_NEG) {
         ul = prefix_log(pp) + u.phi;
-        if (!g_U_nobml) {
+        {
           long double dot = 0.0L;
           const long double* eb = &prEBr[ix(pp, 0)];
           for (int y = qp + 1; y < n; ++y) dot += u.lin[y] * eb[y];
@@ -470,7 +437,7 @@
       const PrUR& r = pr_ur(pp);
       if (r.lmax > HALF_NEG) {
         ur = (E.w_beta1 + st.prS[qp + 1]) + r.r1;
-        if (!g_U_nobml) {
+        {
           long double dot = 0.0L;
           const long double* eb = &prEBc[ix(qp, 0)];
           for (int i = 0; i < pp; ++i) dot += r.lin[i] * eb[i];
@@ -505,14 +472,6 @@
       gz_dp[who].push_back(dp);
       gz_dq[who].push_back(dq);
     };
-    if (pr_geps <= 0.0 && pr_gB <= 0) {
-      out = std::move(all);
-      gs_after[kind] += static_cast<long long>(m);
-      gs_share[kind] += 1.0;
-      rec_after();
-      pr_sel_sec += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-      return;
-    }
     std::vector<double> io(m);
     double tot = NEG_INF;
     for (size_t k = 0; k < m; ++k) {
@@ -569,10 +528,6 @@
             std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() -
             (d.pr_sel_sec - s0);
         d.pr_grow_sec += dt;
-        if (d.prof_on) {
-          const int r = d.prof_region;
-          if (r >= 0 && r < 4) d.prof_grow_reg[r] += dt;
-        }
       }
     }
   };
@@ -607,7 +562,6 @@
         continue;
       }
       pr_steps(a, b, false, true, nb);
-      if (nb.empty() && p2_g_fb && p2_g_mode > 0 && !g_in_set(a, b)) g_one_step(a, b, nb);
       bool ready = true;
       for (const ChainNbr& t : nb)
         if (!prG.count(key2(t.x, t.y))) {
@@ -667,15 +621,13 @@
     PrGrowTimer gt(*this);
     std::vector<ChainNbr> nb;
     pr_steps(x, y, inner, true, nb);
-    if (nb.empty() && p2_g_fb && p2_g_mode > 0 && !g_in_set(x, y)) g_one_step(x, y, nb);
     count_steps(0, nb);
     for (const ChainNbr& t : nb) pr_gbuild(t.x, t.y);
     PProf p;
     if (pr_fast > 0) {
       pr_hg_trim();
       pr_node_acc(x, y, inner, true, nb, E.end_ok(x, y) ? E.at(x, y) : NEG_INF, pr_gchild(), prHg);
-      if (pr_gapfree && pr_cut_roots) pr_cut_drop += pr_finish_out_d(p, pr_cut);
-      else dacc_finish(p, 0.0);
+      dacc_finish(p, 0.0);
       pr_linify(p);
       ++pr_roots;
       gm_roots += pbytes(p);
@@ -688,8 +640,7 @@
       const PProf& q = prG.find(key2(t.x, t.y))->second;
       for (size_t k = 0; k < q.k.size(); ++k) acc.add(q.k[k], t.w + q.w[k]);
     }
-    if (pr_gapfree && pr_cut_roots) pr_cut_drop += pr_finish_out(acc, p, pr_cut);
-    else acc.finish(p, 0.0);
+    acc.finish(p, 0.0);
     ++pr_roots;
     gm_roots += pbytes(p);
     gm_update();
@@ -755,8 +706,6 @@
         dacc_finish(all, 0.0);
         gs_who = 2;
         pr_gselect(all, out, 1);
-      } else if (pr_gapfree && pr_cut_roots) {
-        pr_cut_drop += pr_finish_out_d(out, pr_cut);
       } else {
         dacc_finish(out, 0.0);
       }
@@ -776,8 +725,6 @@
       acc.finish(all, 0.0);
       gs_who = 2;
       pr_gselect(all, out, 1);
-    } else if (pr_gapfree && pr_cut_roots) {
-      pr_cut_drop += pr_finish_out(acc, out, pr_cut);
     } else {
       acc.finish(out, 0.0);
     }
@@ -789,7 +736,7 @@
   }
 
  public:
-  // ------------------------------------------------ --grow-rec: layered marginal vectors
+  // ------------------------------------------------ layered marginal vectors
   // RN of a growth node / root / key / helper: L[m][q'] = sum_p' G_m[p', q'] C[p'-1] and
   // R[m][p'] = sum_q' G_m[p', q'] e^beta1 Sbar[q'+1], G_m the growth weight with m multiloop
   // steps (m = 2: two or more).  Same steps, tables and caps as the profiles (pr_steps,
@@ -803,7 +750,7 @@
   struct RN {
     RV L[3], R[3];
     double tot = NEG_INF;  // log of the summed built layers (L and R), the --grow-ml-c rank
-    // --grow-node-trunc: kept (index, log value) of L (0) and R (1), layers summed, index order;
+    // --bG: kept (index, log value) of L (0) and R (1), layers summed, index order;
     // rest: log of the R mass dropped in this node's subtree (bounds any missing R entry)
     std::vector<std::pair<int, double>> T[2];
     double rest = NEG_INF;

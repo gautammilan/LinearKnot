@@ -32,10 +32,7 @@
 
  private:
   double pr_qz(int a, int b) const {
-    if (qz_audit && a <= b && b < n && b > l2r_done[LT_QZ]) ++qz_unf_pr;
-    if (!pr_qz_unp) return qz_log(a, b);
-    if (a > b) return 0.0;
-    return E.wu * (b - a + 1);
+    return qz_log(a, b);
   }
   // Sparse log profile over key2(a, b), ascending.  --pr-fast: lin[k] = e^(w[k] - mx) as well
   // (filled by pr_linify for the profiles that are merged into others).
@@ -46,9 +43,6 @@
     std::vector<double> lin;
     double tot = NEG_INF;  // log sum of w, set by pr_linify
   };
-  // --sweep-check: double V profiles (pass 0) and the pair list, saved before the float readback.
-  std::unordered_map<uint64_t, PProf> sw_ref;
-  std::vector<std::pair<int, int>> sw_pairs;
   // --sweep: gamma of each pair, without the prefix. 0 = full right gap, 1 = gap <= loop cap.
   std::unordered_map<uint64_t, std::unordered_map<uint64_t, double>> sw_ga[2];
   bool sw_filled = false;
@@ -83,7 +77,7 @@
     const double a = qz_log(0, qp), b = qz_log(0, q);
     return a > HALF_NEG && b > HALF_NEG ? a - b : NEG_INF;
   }
-  int pr_abl = 0, pr_abl_p = -1, pr_abl_q = -1, pr_abl_pk = 0;
+  int pr_abl = 0, pr_abl_p = -1, pr_abl_q = -1;
   long long pr_sep_evals = 0, pr_sep_pp = 0, pr_sep_ppk = 0;
 
  private:
@@ -243,8 +237,6 @@
   // Pair list for a pass-2 step. Flags off: the current kept pairs (partner list when set).
   const std::vector<std::vector<int>>& pr_pair_list(bool scan) const {
     const StemEst& st = *stem_;
-    if (!scan && p2_v_mode > 0) return st.prKeptRightV;
-    if (scan && p2_g_mode > 0) return st.prKeptRightG;
     if (!scan && st.pr_partner) return st.prKeptRightP;
     return st.prKeptRight;
   }
@@ -262,7 +254,7 @@
         out.push_back({xo, *it, 0, s + pair_bonus});
       }
     }
-    if (!ml || !pr_ml || (!scan && !pr_partner_ml) || (scan && rec_noml) || !E.end_ok(x, y)) return;
+    if (!ml || (scan && rec_noml) || !E.end_ok(x, y)) return;
     const int S = pr_ml_span;
     const double br = E.w_bp + E.at(x, y);
     std::vector<std::pair<int, double>> qm;
@@ -335,7 +327,7 @@
     s.on = false;
     s.qm.clear();
     s.lr.clear();
-    if (!pr_ml || (!scan && !pr_partner_ml) || (scan && rec_noml) || !E.end_ok(x, y)) return;
+    if ((scan && rec_noml) || !E.end_ok(x, y)) return;
     const StemEst& st = *stem_;
     const int S = pr_ml_span;
     s.on = true;
@@ -370,8 +362,6 @@
     const uint64_t key = key3(xo, y, kind);
     auto it = cache.find(key);
     if (it != cache.end()) return it->second;
-    std::unique_ptr<SecTimer> ptm(lpf && !scan ? new SecTimer(vi_help_s) : nullptr);
-    const long long a0 = pr_adds;
     const StemEst& st = *stem_;
     const std::vector<std::vector<int>>& KR = pr_pair_list(scan);
     const std::vector<int>& kr = KR[xo];
@@ -405,7 +395,6 @@
       pr_linify(p);
     }
     const int sc = scan ? 0 : 1;
-    if (!scan) vi_help_adds += pr_adds - a0;
     ++pr_hbuilt[sc];
     pr_hentries[sc] += static_cast<long long>(p.k.size());
     pr_hterms[sc] += static_cast<long long>(prHT.size());
@@ -464,9 +453,6 @@
                    double self_w, Get child, std::unordered_map<uint64_t, PProf>& hcache) {
     std::vector<std::pair<const PProf*, double>> terms;
     terms.reserve(nb.size());
-    const bool vp = lpf && !scan;
-    std::chrono::steady_clock::time_point t0;
-    if (vp) t0 = std::chrono::steady_clock::now();
     size_t n_int = 0;
     if (pr_fast >= 2) {
       for (const ChainNbr& t : nb)
@@ -475,12 +461,6 @@
       MlSplit s;
       pr_split(x, y, scan, s);
       if (s.on) {
-        if (vp) {
-          const long long c = static_cast<long long>(s.qm.size() + s.lr.size());
-          vi_mlc += c;
-          vi_mlc_max = std::max(vi_mlc_max, c);
-          ++vi_ml_nodes;
-        }
         const size_t nc = s.qm.size() + s.lr.size();
         if (!scan && pr_vmlk > 0 && nc > static_cast<size_t>(pr_vmlk)) {
           std::chrono::steady_clock::time_point tk = std::chrono::steady_clock::now();
@@ -534,24 +514,13 @@
       for (const ChainNbr& t : nb) terms.emplace_back(child(t.x, t.y), t.w);
       n_int = terms.size();
     }
-    if (vp) vi_lap(t0, vi_terms_s);
     double ref = self_w;
     for (const auto& [q, w] : terms)
       if (q->mx > HALF_NEG) ref = std::max(ref, w + q->mx);
     dacc_begin(ref > HALF_NEG ? ref : 0.0);
     if (self_w > HALF_NEG) dacc_add1(!scan && pr_vxs ? key2(x, 0) : key2(x, y), self_w);
-    const long long a0 = pr_adds;
     for (size_t i = 0; i < n_int; ++i) dacc_add(*terms[i].first, terms[i].second);
-    if (vp) {
-      vi_add_int += pr_adds - a0;
-      vi_lap(t0, vi_add_int_s);
-    }
-    const long long a1 = pr_adds;
     for (size_t i = n_int; i < terms.size(); ++i) dacc_add(*terms[i].first, terms[i].second);
-    if (vp) {
-      vi_add_ml += pr_adds - a1;
-      vi_lap(t0, vi_add_ml_s);
-    }
     pr_nterms[scan ? 0 : 1] += static_cast<long long>(terms.size());
   }
 
@@ -577,39 +546,9 @@
     return a.ys < b.ys;
   }
 
-  // --pr-partner-maxpairs K (0 = off): future partner stems of at most K chain pairs, counted
-  // innermost to outermost (the inner pair included; branch helices of their multiloops not
-  // counted).  V_c(x, y): the profile of exactly c pairs from x.y out (V_1 = the stop at x.y,
-  // V_c = sum of the steps' w V_{c-1}(x', y')), keys (xs, ys, c), c <= K - 1; the arm entries
-  // of an inner pair are its own stop plus its steps' w sum_c V_c.  The cut acts on sum_c.
-  // check: the uncapped V built as well, arm entries compared.
  public:
-  int pr_pmax = 0;
-  bool pr_pcheck = false;
-  long long pr_V_pairs = 0, pr_V_layer_entries = 0, pc_n = 0, pc_key_mis = 0, pe_n = 0,
-            pe_key_mis = 0;
-  double pc_maxd = 0.0, pe_maxd = 0.0;
-  void set_stem_pr_partner_cap(int K, bool check) {
-    pr_pmax = K;
-    pr_pcheck = check;
-  }
-  // --pr-partner-ml off: the future partner stems (V and the arm entries, pr_steps with
-  // scan = false) take interior steps only; the growth chains (scan = true) keep their
-  // multiloop steps.  check (--pr-partner-ml-check, n <= 40, cut 0, v-eps 0): the arm entries
-  // against every multiloop-free partner stem enumerated over all enclosing kept pairs.
-  bool pr_partner_ml = true, pr_pmlcheck = false;
-  long long pm_n = 0, pm_key_mis = 0;
-  double pm_maxd = 0.0;
-  void set_stem_pr_partner_ml(bool ml, bool check) {
-    pr_partner_ml = ml;
-    pr_pmlcheck = check;
-  }
 
  private:
-  static uint64_t kcl(int xs, int ys, int c) {
-    return (static_cast<uint64_t>(static_cast<uint32_t>(xs)) << 40) |
-           (static_cast<uint64_t>(static_cast<uint32_t>(ys)) << 8) | static_cast<uint64_t>(c);
-  }
   static int kcl_xs(uint64_t k) { return static_cast<int>(k >> 40); }
   static int kcl_ys(uint64_t k) { return static_cast<int>((k >> 8) & 0xffffffffu); }
 

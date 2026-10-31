@@ -16,7 +16,6 @@
     // multi fire on that path. --g-sweep states turns G on beside V.
     const bool do_g = (g_sweep == G_SWEEP_STATES);
     const bool do_v = p2_vsweep;
-    const bool do_b = sw_check && p2_vsweep && p2_v_cap <= 0 && g_ntr_K <= 0;
     const int Kg = g_ntr_K, Kv = p2_v_cap;
     const double a1 = E.w_alpha1, a2 = E.w_alpha2, a3 = E.w_alpha3;
     long long pushes = 0, st_g = 0, st_v = 0;
@@ -62,10 +61,6 @@
       };
       if (do_g) one(d.g, s.g, g_merge_sec, &g_pushes, &g_at);
       if (do_v) one(d.v, s.v, v_merge_sec, &v_pushes, &v_at);
-      if (do_b) {
-        double ignore = 0;
-        one(d.b, s.b, ignore, nullptr, nullptr);
-      }
     };
     auto push_to = [&](M& d, const M& s, double a) {
       if (a < HALF_NEG || s.empty()) return;
@@ -83,9 +78,8 @@
       g_pre_sum += pre;
       if (pre > g_pre_max) g_pre_max = pre;
       const auto tc0 = std::chrono::steady_clock::now();
-      const bool cut_here = !(g_cut_pair_only && cap_kind != 0);
       // --g-sweep states: always entries cut by C_pre * G * S_pre (bG = Kg).
-      if (cut_here && Kg > 0 && static_cast<int>(m.size()) > Kg) {
+      if (Kg > 0 && static_cast<int>(m.size()) > Kg) {
         struct E {
           uint64_t k;
           double w, s;
@@ -365,7 +359,6 @@
         note_push(3, kept_at(Qb_at[j], i));
         const double at = E.at(i, j);
         const double cb = Cb[static_cast<size_t>(j)];
-        if (do_b && cb > HALF_NEG && at > HALF_NEG) add1(pairs[key2(i, j)].b, key2(i, 0), cb + at);
         const double left = i == 0 ? 0.0 : C[static_cast<size_t>(i - 1)];
         const double qb = Qb[ix(i, j)];
         if (i > 0 && cb > HALF_NEG && qb > HALF_NEG)
@@ -527,30 +520,6 @@
         }
         if (any) st.prMuFloor.emplace(k, mn);
         st.prMu.emplace(k, std::move(m.v));
-      }
-    }
-    if (!g_mu_dump.empty()) {
-      std::ofstream md(g_mu_dump);
-      for (const auto& [k, mv] : st.prMu) {
-        const int x = k_hi(k), y = k_lo(k);
-        for (const auto& [bk, w] : mv) {
-          if (!(w > HALF_NEG)) continue;
-          md << "V " << x << " " << y << " " << k_hi(bk) << " " << w << "\n";
-        }
-      }
-      for (const auto& [k, mg] : st.prGamma) {
-        const int x = k_hi(k), y = k_lo(k);
-        std::unordered_map<int, double> byq;
-        for (const auto& [bk, w] : mg) {
-          if (!(w > HALF_NEG)) continue;
-          const int p = k_hi(bk), q = k_lo(bk);
-          md << "G " << x << " " << y << " " << p << " " << q << " " << w << "\n";
-          const double g = w + prefix_log(p);
-          auto it = byq.find(q);
-          if (it == byq.end()) byq.emplace(q, g);
-          else it->second = log_add(it->second, g);
-        }
-        for (const auto& [q, g] : byq) md << "Q " << x << " " << y << " " << q << " " << g << "\n";
       }
     }
     st.pr_sw_states_g = st_g;
@@ -717,94 +686,14 @@
                  "v_n %lld v_mean %.3f v_p99 %lld v_pre_mean %.3f usec %.4f\n",
                  g_at.n, g_at.mean(), g_at.p99(), g_pre.mean(), v_at.n, v_at.mean(), v_at.p99(),
                  v_pre.mean(), usec);
-    if (do_b && !Qb_b.empty()) {
-      auto rel = [](double a, double b) {
-        if (a < HALF_NEG && b < HALF_NEG) return 0.0;
-        if (a < HALF_NEG || b < HALF_NEG) return 1e300;
-        return std::fabs(std::expm1(a - b));
-      };
-      double worst = 0;
-      int wx = -1, wy = -1;
-      long long nent = 0;
-      for (int j = 0; j < n; ++j) {
-        for (size_t r = 0; r < Qb_at[j].slots(); ++r) {
-          const int i = Qb_at[j].keys[r];
-          if (i < 0 || !E.end_ok(i, j)) continue;
-          const double ref = Qb_b[ix(i, j)];
-          double got = NEG_INF;
-          auto it = pairs.find(key2(i, j));
-          if (it != pairs.end()) {
-            for (const auto& [bk, w] : it->second.b) {
-              if (w < HALF_NEG) continue;
-              const int b = k_hi(bk);
-              const double c = b > 0 ? C[static_cast<size_t>(b - 1)] : 0.0;
-              got = log_add(got, c + w);
-            }
-          }
-          if (got < HALF_NEG && ref < HALF_NEG) continue;
-          ++nent;
-          const double d = rel(got, ref);
-          if (d > worst) {
-            worst = d;
-            wx = i;
-            wy = j;
-          }
-        }
-      }
-      std::fprintf(stderr, "[sweep-4c] pairs %lld max_rel %.3e at %d.%d\n", nent, worst, wx, wy);
-    }
   }
 
   void pass2_apply(StemEst& st) {
-    if (p2_v_cap > 0 || p2_g_eager || p2_qz_beam > 0 || p2_sweep || p2_vsweep) st.prC = C;
-    if (sw_check && !Qb_b.empty()) st.prQb_b = Qb_b.dense();
+    if (p2_v_cap > 0 || p2_qz_beam > 0 || p2_sweep || p2_vsweep) st.prC = C;
     if (p2_sweep || p2_vsweep) sw_hyper_push(st);
-    if (p2_qz_beam <= 0 && p2_v_mode == 0 && p2_g_mode == 0) return;
-    if (st.prC.empty()) st.prC = C;
-    auto take = [&](int mode, int bp, std::vector<std::vector<int>>& byL) {
-      byL.assign(n, {});
-      for (int j = 0; j < n; ++j) {
-        const OMap& at = Qb_at[j];
-        std::vector<std::pair<double, int>> v;
-        v.reserve(at.slots());
-        for (size_t r = 0; r < at.slots(); ++r) {
-          const int i = at.keys[r];
-          if (i < 0 || at.vals[r] < HALF_NEG) continue;
-          // mode 2: inside Q^b. mode 3: C_pre(i-1) * Q^b (prefix * inside).
-          double key = at.vals[r];
-          if (mode == 3 && i > 0) key += C[static_cast<size_t>(i - 1)];
-          v.emplace_back(key, i);
-        }
-        if ((mode == 2 || mode == 3) && bp > 0 && static_cast<int>(v.size()) > bp) {
-          std::nth_element(v.begin(), v.begin() + bp, v.end(),
-                           [](const std::pair<double, int>& a, const std::pair<double, int>& b) {
-                             return a.first > b.first;
-                           });
-          v.resize(static_cast<size_t>(bp));
-        }
-        for (const auto& e : v) byL[e.second].push_back(j);
-      }
-      for (std::vector<int>& kr : byL) {
-        std::sort(kr.begin(), kr.end());
-        kr.erase(std::unique(kr.begin(), kr.end()), kr.end());
-      }
-    };
-    if (p2_v_mode > 0) take(p2_v_mode, p2_v_bp, st.prKeptRightV);
-    if (p2_g_mode > 0) {
-      if (p2_v_mode == p2_g_mode && p2_v_bp == p2_g_bp)
-        st.prKeptRightG = st.prKeptRightV;
-      else
-        take(p2_g_mode, p2_g_bp, st.prKeptRightG);
-    }
     if (p2_qz_beam <= 0) return;
-    // --qzbar-old: keep dense prQz from build_principled; do not replace with beamed qz_col.
-    if (qzbar_old) {
-      st.qz_on = 0;
-      st.qz_col.clear();
-      st.qz_col.shrink_to_fit();
-      return;
-    }
-    if (qz_beam_fill && p2_qz_key != 2 && !qz_keep.empty()) {
+    if (st.prC.empty()) st.prC = C;
+    if (qz_beam_fill && !qz_keep.empty()) {
       st.qz_col.assign(static_cast<size_t>(n), {});
       st.p2_qz_n = 0;
       for (int l = 0; l < n; ++l) {
@@ -821,21 +710,6 @@
       qz_keep.clear();
       qz_keep.shrink_to_fit();
       return;
-    }
-    if (p2_qz_key == 2) {
-      st.prRight.assign(n, NEG_INF);
-      for (int j = 0; j < n; ++j) {
-        const OMap& at = Qb_at[j];
-        double acc = NEG_INF;
-        for (size_t r = 0; r < at.slots(); ++r) {
-          const int i = at.keys[r];
-          if (i < 0 || at.vals[r] < HALF_NEG) continue;
-          const double b = Qb_b[ix(i, j)];
-          if (b < HALF_NEG) continue;
-          acc = log_add(acc, at.vals[r] + b - logZ);
-        }
-        st.prRight[j] = acc;
-      }
     }
     const auto t0 = std::chrono::steady_clock::now();
     struct Acc {
@@ -905,22 +779,7 @@
         double key = q + (k > 0 ? st.prC[static_cast<size_t>(k - 1)] : 0.0);
         // key2 = key1 * Pr(k-1 is a pair right end). Pr = 0 ranks last and is kept
         // only when the beam still has room (a missing Q^z_pre read stays 0).
-        if (p2_qz_key == 2 && k > 0) {
-          const double pr = st.prRight[static_cast<size_t>(k - 1)];
-          key = pr > HALF_NEG ? key + pr : NEG_INF;
-        }
         cs.push_back({k, q, dz ? a.acc : 0.0, a.u1, a.u2, key});
-      }
-      if (g_beam_stats.f) {
-        std::vector<double> keys;
-        keys.reserve(cs.size());
-        for (const Cand& c : cs) keys.push_back(c.key);
-        std::sort(keys.begin(), keys.end(), [](double a, double b) { return a > b; });
-        const size_t kept_n =
-            static_cast<int>(cs.size()) > p2_qz_beam ? static_cast<size_t>(p2_qz_beam) : keys.size();
-        const int full = static_cast<int>(cs.size()) > p2_qz_beam ? 1 : 0;
-        g_beam_stats.log_prune("Qz_pre", l, keys.size(), kept_n, BeamStats::mass_share(keys, kept_n),
-                               full);
       }
       if (static_cast<int>(cs.size()) > p2_qz_beam) {
         std::nth_element(cs.begin(), cs.begin() + p2_qz_beam, cs.end(),

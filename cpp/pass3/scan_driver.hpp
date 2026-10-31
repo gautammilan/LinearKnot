@@ -7,28 +7,16 @@
 
  public:
   DP03(const std::string& seq, int beam, bool allow_pk, int loop_cap, bool score_qz,
-       bool arm_score = false, const AccessRec* access = nullptr, int max_gap_scan = 200,
-       int max_arm_len = 0, bool gap_step = false, const GateCfg* gate_cfg = nullptr,
-       const Gate* gate = nullptr, const int* table_beam = nullptr,
-       bool keep_runs = false)
+       bool gap_step = false, const int* table_beam = nullptr)
       : E(seq), n(E.n), beam(beam > 0 ? beam : 0), allow_pk(allow_pk),
-        cap(loop_cap), score_qz(score_qz), arm_score(arm_score), access(access),
-        max_gap_scan(max_gap_scan),
-        max_arm_len(max_arm_len <= 0 ? E.n : std::min(max_arm_len, E.n)), gap_step(gap_step),
-        gate_(gate), keep_runs(keep_runs) {
-    if (gate_cfg) gcfg = *gate_cfg;
+        cap(loop_cap), score_qz(score_qz), gap_step(gap_step) {
     // table_beam[t] < 0: the global beam; 0: infinite
     for (int t = 0; t < BT_N; ++t)
       tbeam[t] = table_beam && table_beam[t] >= 0 ? table_beam[t] : this->beam;
     alloc();
   }
 
-  DropLog* drops = nullptr;
-  bool mem_scan = false;  // --mem-log: checkpoints at the quarters of this run's scan
-  // --remove-state: states (state_key) erased at their table's pruning point, any beam
-  const std::unordered_set<uint64_t>* remove_keys = nullptr;
 
-  ArmStats arm_stats;
   GateStats gate_stats;
 
   double pfunc() {
@@ -39,11 +27,11 @@
       cpu_stop_check(0);
       if (allow_pk && l2r_mode != 1) {
         fill_Qg(j);
-        prune4(Qg[j], BT_QG, j, true, GATE_QG);
+        prune4(Qg[j], BT_QG, j, GATE_QG);
         fill_Qgls(j);
         prune4(Qgls[j], BT_QGLS, j);
         fill_Qgl(j);
-        prune4(Qgl[j], BT_QGL, j, true, GATE_QGL);
+        prune4(Qgl[j], BT_QGL, j, GATE_QGL);
         fill_Qgr(j);
         prune4(Qgr[j], BT_QGR, j);
         fill_Qp(j);
@@ -107,7 +95,6 @@
         else fill_Qz(j);
         const double dt = std::chrono::duration<double>(std::chrono::steady_clock::now() - tq).count();
         sec_qz += dt;
-        if (prof_on) prof_qz_sec += dt;
       }
       if (l2r_mode != 0) l2r_done[LT_QZ] = j;
       {
@@ -116,19 +103,12 @@
         sec_c += std::chrono::duration<double>(std::chrono::steady_clock::now() - tq).count();
       }
       advance_pk_inside(j);
-      if (keep_runs && dz) save_runs(j);
       if (allow_pk && l2r_mode != 1) {
         fill_Qgrs(j);
         prune4(Qgrs[j], BT_QGRS, j);
       }
       if (allow_pk && l2r_mode != 0) l2r_step_end(j);
       if (l2r_mode != 0) note_col();
-      if (g_beam_stats.f) g_beam_stats.log_Q(j + 1, C[j]);  // log Q_{1,t} = C[t-1] (1-based t=j+1)
-      if (mem_scan && n >= 4 && (j + 1) % (n / 4) == 0 && j + 1 < n) {
-        std::vector<MemItem> it;
-        mem_items(it, "", false, true);
-        mem_log(("scan_j" + std::to_string(j + 1)).c_str(), it);
-      }
     }
     inside_done = true;
     logZ = n > 0 ? C[n - 1] : 0.0;
@@ -176,8 +156,6 @@
         std::fprintf(stderr, " %s %.3f", tn[t], gs_tab_kept[t] / dn);
       std::fprintf(stderr, "\n");
     }
-    if (sw_check && l2r_mode != 0) sw_growth_check();
-    if (!g_eq_path.empty() && l2r_mode != 0) g_eq_write();
     return logZ;
   }
 
@@ -185,46 +163,4 @@
     outside();
     return collect_bpp(cutoff);
   }
-  // Surviving inside Q^b, 1-based. Used by --dump-qb. Does not change Z.
-  void dump_qb(FILE* f) const {
-    for (int j = 0; j < n; ++j) {
-      const OMap& at = Qb_at[j];
-      for (size_t r = 0; r < at.slots(); ++r) {
-        const int i = at.keys[r];
-        if (i < 0 || at.vals[r] < HALF_NEG) continue;
-        std::fprintf(f, "qb %d %d %.17g\n", i + 1, j + 1, at.vals[r]);
-      }
-    }
-  }
-
-  // One JSON line of per-state gate diagnostics (see write_gate_diag).
-  std::string gate_diag(const Gate& gd, const std::vector<double>& taus, const std::string& id,
-                        int span, double delta, int long_span);
-
-  // Exact posterior weight of every stored state of the beamed tables (format at the
-  // definition).
-  void dump_states(FILE* f, const std::string& id, double min_w);
-
-  // Rank of every candidate under the default and the --stem-est scores (format at the
-  // definition); exact run.
-  void dump_scores(FILE* f, const std::string& id, const StemEst& st, double min_w);
-  void dump_ext(FILE* f, const std::string& id, const StemEst& st,
-                const std::unordered_map<uint64_t, double>& w_of, int kmax);
-
-  // --pr-oracle: the principled Out_hat of every 4-index state of this exact run with each
-  // nested piece (H, Qzbar, Mbar, Ctx) nested or exact, against the exact outside (format
-  // at the definition).
-  struct PrVar {
-    std::string name;
-    bool hx, zx, mx, cx;  // H, Qzbar, Mbar, Ctx exact
-    int fi;               // kept-pair floor: 0 = 1e-7, 1 = 0
-    bool ml;              // multiloop stem steps (f, g, h)
-    int lc;               // interior steps: unpaired per side <= min(lc, cap)
-  };
-  void pr_oracle_diag(StemEst& st, FILE* f, const std::string& id, const std::string& sets);
-  void pr_hybrid_outside(const PrVar& v, const StemEst& st, const std::vector<char>& km,
-                         const std::vector<std::vector<int>>& kr, std::vector<Tab4>* hb,
-                         std::vector<double> own[2], const std::vector<size_t> off[5]);
-  void pr_build_hbar(const std::vector<char>& km, const std::vector<std::vector<int>>& kl,
-                     const std::vector<double>& mb, bool ml, int lc, std::vector<Tab4>& hb);
 

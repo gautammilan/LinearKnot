@@ -21,55 +21,37 @@ struct StemEst {
   // --stem-est-helpers nested: log outside weight of pair (x, y) in the nested-only run (its
   // Qb outside value; pairs without one get the exterior-loop value C0[x-1] + at + S[y+1]).
   std::vector<double> beta;
-  // --stem-est-chain: kept pairs (nested pair probability >= floor), the kept right partners of
+  // Arm chains: kept pairs (nested pair probability >= floor), the kept right partners of
   // each x ascending, and mbar(i, j) = the nested multiloop interior Qm (Qmp with stem_ml).
   bool chain = false;
   std::vector<char> kept;
   std::vector<std::vector<int>> kept_right;
   std::vector<double> mbar;
   size_t n_kept = 0;
-  // --stem-est-hr av: log phi_gamma(x, y) of every pair (availability from the nested pair
-  // probabilities) and the index of Uav(x', y') = E_in Tav (no prefix / suffix factors).
-  // --stem-est-hr phi: the same lphi, index_av holds the original entries with phi_gamma
-  // multiplied in (hr_phi).
-  bool hr_av = false, hr_phi = false;
-  std::vector<double> lphi;
   stemidx::PersistentSum index_av;
-  size_t entries_av = 0, dropped_av = 0;
+  size_t entries_av = 0;
   // --stem-est-principled: from the nested pre-pass (exact for n <= 1000, else the nested
   // beam, every pair span): exterior suffix prS[y] = Sbar[y, n-1] (prS[n] = 0), gap filler
   // prQz = Qzbar, multiloop interior prMbar (Qmp with stem_ml), prBml[d][e] = every way the
   // closed segment [d, e] sits as one pseudoknot branch of a multiloop (DP03's pseudoknot
-  // branch edges, beta1m excluded), kept pairs (pair probability >= --pr-floor);
-  // --stem-est-principled-nested: the outsides of the closed Qb / Qm / Qm2 values.
-  bool pr = false, pr_nested = false;
-  std::vector<double> prS, prQz, prMbar, prBml, prQb_b, prQm_b, prQm2_b;
+  // branch edges, beta1m excluded), kept pairs (pair probability >= the floor); prQb_b: the
+  // nested Qb outsides (--out-id only).
+  bool pr = false;
+  std::vector<double> prS, prQz, prMbar, prBml, prQb_b;
   // --sweep: finite PrMbar cells. prMbarAt[j] = left ends at right end j;
   // prMbarRight[i] = right ends at left end i, sorted.
   std::vector<std::vector<int>> prMbarAt, prMbarRight;
   long long pr_mbar_n = 0;
   int pr_mbar_max = 0;
   // Hyperedge sweep. prGamma / prMu are pair maps (Qm and Qm2 maps are freed after they push).
-  // prMu keys are key2(b, 0). prMuFloor is the smallest kept mu entry (--v-floor).
+  // prMu keys are key2(b, 0). prMuFloor is the smallest kept mu entry.
   std::unordered_map<uint64_t, std::unordered_map<uint64_t, double>> prGamma, prMu;
   std::unordered_map<uint64_t, double> prMuFloor;
   long long pr_sw_states_g = 0, pr_sw_states_v = 0, pr_sw_pushes = 0;
   double pr_sw_sec = 0;
-  // --pr-v-diag / --pr-v-ratio: the nested inside log Qb of every pair.
+  // The nested inside log Qb of every pair.
   std::vector<double> prQbIn;
-  double QbIn(int i, int j) const {
-    if (skip_qbin) lean_abort("QbIn");
-    return prQbIn[static_cast<size_t>(i) * n + j];
-  }
   std::vector<char> prKept;
-  // --l2r-lean: the structures not built (index, S, C0, beta, chain; prKept / prQbIn); any
-  // accessor of one aborts
-  bool lean = false, skip_kept = false, skip_qbin = false;
-  [[noreturn]] static void lean_abort(const char* what) {
-    std::fprintf(stderr, "--l2r-lean: %s read but not built\n", what);
-    std::fflush(nullptr);
-    std::abort();
-  }
   std::vector<std::vector<int>> prKeptRight;
   size_t pr_n_kept = 0;
   // --pr-partner-floor: the pairs of the future-stem / partner profiles (pair probability
@@ -77,9 +59,6 @@ struct StemEst {
   bool pr_partner = false;
   std::vector<std::vector<int>> prKeptRightP;
   size_t pr_n_partner = 0;
-  // --pr-oracle: nested log pair probability of every pair (NEG_INF if none).
-  bool want_lp = false;
-  std::vector<double> prLP;
   long long bml_check_cells = 0, bml_check_mis = 0;
   double bml_check_rel = 0.0, pr_prep_sec = 0.0, prof_qz_pre = 0.0;
   // Q^z_pre kept per right end l (starts k, sorted by C(k-1)+Q^z). qz_on == 0 is the dense copy.
@@ -89,8 +68,7 @@ struct StemEst {
   };
   int qz_on = 0;
   std::vector<std::vector<QzEnt>> qz_col;
-  std::vector<double> prC, prRight;
-  std::vector<std::vector<int>> prKeptRightV, prKeptRightG;
+  std::vector<double> prC;
   long long p2_qz_n = 0;
   double p2_qz_sec = 0.0;
   double Qzbar(int a, int b) const {
@@ -111,20 +89,16 @@ struct StemEst {
   }
   double PrMbar(int i, int j) const { return prMbar[static_cast<size_t>(i) * n + j]; }
   double H(int u, int v, int q) const {
-    if (lean) lean_abort("H");
     return index.range_logsum(q, u + 1, v - 1);
   }
   double Hav(int u, int v, int q) const { return index_av.range_logsum(q, u + 1, v - 1); }
   double H2(int p, int u, int v) const {
-    if (lean) lean_abort("H2");
     return index2.range_logsum(n - 1 - p, n - v, n - 2 - u);
   }
   double B(int x, int y) const {
-    if (lean) lean_abort("B");
     return beta[static_cast<size_t>(x) * n + y];
   }
   double Mbar(int i, int j) const {
-    if (lean) lean_abort("Mbar");
     return mbar[static_cast<size_t>(i) * n + j];
   }
   size_t bytes() const {
@@ -132,7 +106,6 @@ struct StemEst {
     if (mirror) b += 12 * entries2 + 16 * index2.nodes();
     b += 8 * beta.size();
     if (chain) b += kept.size() + 8 * mbar.size() + 4 * n_kept;
-    if (hr_av) b += 8 * lphi.size() + 12 * entries_av + 16 * index_av.nodes();
     return b;
   }
 };

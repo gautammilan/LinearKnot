@@ -144,7 +144,6 @@ struct OMap {
       vals.shrink_to_fit();
     }
   }
-  bool sparse() const { return keys.size() > 2 * static_cast<size_t>(live) + 16; }
   size_t slots() const { return keys.size(); }
 };
 

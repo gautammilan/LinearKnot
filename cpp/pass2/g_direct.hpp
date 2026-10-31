@@ -28,7 +28,7 @@
       else it->second = log_add(it->second, w);
     };
     const StemEst& st = *stem_;
-    // Cap a pair's map before it is pushed (--g-cut). See g_cut enum at file scope.
+    // Cap a pair's map before it is pushed: the top b_G q' by Ghat + ntrUL, all (p', q') kept for those q'.
     auto cap_ga = [&](Ga& m) {
       const long long pre = static_cast<long long>(m.size());
       ++g_pre_n;
@@ -47,47 +47,13 @@
         finish();
         return;
       }
-      if (g_cut == G_CUT_ENTRIES) {
-        // Top-K raw (p',q') by C_pre(p'-1) * G * S_pre(q'+1). Scan still applies Chat at read.
-        struct E {
-          uint64_t k;
-          double w, s;
-        };
-        std::vector<E> v;
-        v.reserve(m.size());
-        for (const auto& [k, w] : m) {
-          if (w < HALF_NEG) continue;
-          const int p = k_hi(k), q = k_lo(k);
-          double s = w;
-          if (p > 0 && !st.prC.empty()) s += st.prC[static_cast<size_t>(p - 1)];
-          if (q + 1 < 0 || q + 1 >= static_cast<int>(st.prS.size())) continue;
-          const double sb = st.prS[static_cast<size_t>(q + 1)];
-          if (sb < HALF_NEG) continue;
-          s += sb;
-          v.push_back({k, w, s});
-        }
-        if (static_cast<int>(v.size()) > K) {
-          std::nth_element(v.begin(), v.begin() + K, v.end(), [](const E& a, const E& b) {
-            if (a.s != b.s) return a.s > b.s;
-            return a.k < b.k;
-          });
-          v.resize(static_cast<size_t>(K));
-        }
-        Ga out;
-        out.reserve(v.size());
-        for (const E& e : v) out.emplace(e.k, e.w);
-        m.swap(out);
-        finish();
-        return;
-      }
-      // topq and collapse: rank by q' with Ghat[q'] = sum_p' G*C_pre (+ ntrUL / Sbar).
+      // Rank by q' with Ghat[q'] = sum_p' G*C_pre (+ ntrUL).
       std::unordered_map<int, double> byq;
       byq.reserve(m.size());
       for (const auto& [k, w] : m) {
         if (w < HALF_NEG) continue;
         const int p = k_hi(k), q = k_lo(k);
         double g = w;
-        // Collapse stores key2(0,q') with Chat already applied.
         if (p > 0 && !st.prC.empty()) g += st.prC[static_cast<size_t>(p - 1)];
         auto it = byq.find(q);
         if (it == byq.end()) byq.emplace(q, g);
@@ -101,10 +67,7 @@
       v.reserve(byq.size());
       for (const auto& [q, g] : byq) {
         double s = NEG_INF;
-        if (p2_g_suffix) {
-          const double sb = st.prS[static_cast<size_t>(q + 1)];
-          if (sb > HALF_NEG) s = g + sb;
-        } else if (q >= 0 && q < static_cast<int>(ntrUL.size()) && ntrUL[q] > HALF_NEG) {
+        if (q >= 0 && q < static_cast<int>(ntrUL.size()) && ntrUL[q] > HALF_NEG) {
           s = g + ntrUL[q];
         }
         if (s > HALF_NEG) v.push_back({q, g, s});
@@ -116,15 +79,7 @@
         });
         v.resize(static_cast<size_t>(K));
       }
-      if (g_cut == G_CUT_COLLAPSE) {
-        Ga out;
-        out.reserve(v.size());
-        for (const E& e : v) out.emplace(key2(0, e.q), e.g);
-        m.swap(out);
-        finish();
-        return;
-      }
-      // topq: retain all raw (p',q') mass for the kept q'.
+      // Retain all raw (p',q') mass for the kept q'.
       std::unordered_set<int> keep;
       keep.reserve(v.size());
       for (const E& e : v) keep.insert(e.q);
