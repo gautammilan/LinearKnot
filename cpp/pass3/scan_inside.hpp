@@ -75,7 +75,7 @@
   struct SMap {
     std::vector<uint64_t> keys;
     std::vector<SSt> v;
-    std::unordered_map<uint64_t, int> idx;
+    FastMap<uint64_t, int> idx;
     int at(uint64_t k) {
       auto it = idx.find(k);
       if (it != idx.end()) return it->second;
@@ -642,7 +642,7 @@
   // -1: l2r_beam; 0: none
   int l2r_tb[PT_N] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
   int ltb(int pt) const { return l2r_tb[pt] < 0 ? l2r_beam : l2r_tb[pt]; }
-  std::unordered_map<uint64_t, int> lArm;
+  FastMap<uint64_t, int> lArm;
   std::vector<double> lYwS;
   long long l2r_pre[PT_N] = {}, l2r_kept[PT_N] = {}, l2r_kmax[PT_N] = {};
   long long l2r_pos[PT_N] = {}, l2r_bind[PT_N] = {};

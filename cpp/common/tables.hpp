@@ -330,7 +330,7 @@ struct Ent {
 struct Grp {
   int v;
   std::vector<Ent> ents;
-  std::unordered_map<uint64_t, int> idx;
+  FastMap<uint64_t, int> idx;
 };
 
 inline uint64_t key2(int p, int u) {
@@ -341,7 +341,7 @@ inline uint64_t key2(int p, int u) {
 // groups[v][(p, u)] with insertion order at both levels.
 struct Tab4 {
   std::vector<Grp> grps;
-  std::unordered_map<int, int> vidx;
+  FastMap<int, int> vidx;
 
   Grp* get(int v) {
     auto it = vidx.find(v);
