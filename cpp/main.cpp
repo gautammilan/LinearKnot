@@ -35,8 +35,8 @@
 //   direct = sw_fill (pair→pair via PrMbar); states = sw_hyper_push do_g on Qm/Qm2/pair (E1–E9),
 //   cut every state to bG entries by C_pre*G*S_pre; scan still applies Chat at read.
 //   lazy = the same edges recorded in pass 2, pulled from the scan with Chat summed in at every
-//   node (pass2/g_lazy.hpp); --bG-node K (default 16), --bG-read K_read (default K),
-//   --bG-node-key sbar|ul.
+//   node (pass2/g_lazy.hpp); --bG-node K (default 32), --bG-read K_read (default K),
+//   --bG-node-key ul|sbar (default ul).
 // --b1 N: the nested pre-pass and the stem-estimate run at every length.
 //   Unset: 200, independent of --b4. 0 keeps every state.
 // Removed (error if passed): --beam.
@@ -141,7 +141,7 @@ std::string normalize(const std::string& s) {
 void usage() {
   std::fprintf(stderr,
                "usage: dp03_cpp [--preset default|accurate] [--b1 N] [--b2 N] [--b4 N] [--bV N] [--bG N] "
-               "[--g-sweep direct|states|lazy] [--bG-node K] [--bG-read K] [--bG-node-key sbar|ul] [--loop-cap L] [--ml-lead-cap N|n] [--max-loop M] "
+               "[--g-sweep direct|states|lazy] [--bG-node K] [--bG-read K] [--bG-node-key ul|sbar] [--loop-cap L] [--ml-lead-cap N|n] [--max-loop M] "
                "[--rt RT] [--wc-ends] [--cutoff C] [--no-bpp] [--gap-beam group|step] "
                "[--material dp03|rna1999|vienna2004 [--param-file PATH] [--dangles none|some|all|d2]] "
                "< sequences\n");

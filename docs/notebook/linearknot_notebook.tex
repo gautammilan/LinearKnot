@@ -17,12 +17,13 @@
 \newcommand{\tofill}[1]{\textcolor{red}{\textbf{[tofill: #1]}}}
 \title{LinearKnot project notebook}
 \author{Milan Gautam and collaborators}
-\date{Version 1.5 \quad 2026-10-30}
+\date{Version 1.6 \quad 2026-10-30}
 \begin{document}
 \maketitle
 
 \section*{Changelog}
 \begin{itemize}[leftmargin=*]
+  \item \textbf{1.6} (2026-10-30). Logged K (lazy G, \texttt{-{}-g-sweep lazy}: node $K$ ladder and node key on the 16-sequence set and RP486, binary \texttt{69fc292}). Lazy defaults changed to node $K=32$, key $u_L$, read $K$ = node $K$; the paper preset is unchanged (states, $b_G=256$). The \texttt{[g-read]} report line prints \texttt{g\_mode node\_K node\_key read\_K} in place of the fixed \texttt{g\_cut} field. Updated beams and flags, binaries, Q3 and next steps.
   \item \textbf{1.5} (2026-10-30). \emph{Linear} now means the states sweep with a $b_G$ cut; removed every comparison with the older top-$q'$ G build (old H, the I.2 direct rows, the five-sequence matrix, the old-cut ratios). New H (linear G: identity, Ther $b_G$ ladder, default $b_G=256$) and new I (lazy vs linear: time per pass, work counts, why lazy is faster).
   \item \textbf{1.4} (2026-10-30). Branch \texttt{LinearPass2} at \texttt{f90c40a}. Added the Algorithm section (passes 1 to 3, the states sweep, the cuts, the identity). Logged H (lazy vs linear at \texttt{ca8cd5e}, per pass), I (G through the multiloop states: identity, Ther $b_G$ ladder, five-sequence matrix, new default $b_G=256$), J (unity-build split and dead-code pass, values unchanged). Updated status, paper setting, beams and flags (new flag names), binaries, reference provenance, open questions and next steps.
   \item \textbf{1.3} (2026-10-29). Folded F floor+\texttt{-{}-k-exact} and Pseu~(a) numbers; launched D (16-seq fixed sweep) and C (HXB2 cost) with \texttt{dp03\_fixlam\_sweep}@\texttt{ca8cd5e}.
@@ -31,7 +32,7 @@
 \end{itemize}
 
 \section{Status}
-Branch \texttt{LinearPass2} (a worktree of \texttt{LinearNupack}), head \texttt{f90c40a} (2026-10-30 20:14), pushed to \texttt{git@github.com:gautammilan/LinearKnot.git}, where \texttt{LinearPass2} is now the default branch; tags \texttt{paper-v1} (\texttt{7c4148d}, the code of the paper runs) and \texttt{paper-v1-build} (\texttt{b0987a9}, the same code plus two untracked headers, which builds the paper binary byte for byte) are pushed too. On 2026-10-30 we made G through the multiloop states the default with $b_G=256$ (experiment H), split the 23{,}820-line source into a unity build of about 50 files (J), and deleted the code that no coverage run executes, with 182 options (J). Lazy G is about 2 times faster than linear G in total on Ther, Deha and Pseu, at different beams (I). The HXB2 1--3000 coverage run was killed for memory, so the dead-code pass has not been checked on long sequences.
+Branch \texttt{LinearPass2} (a worktree of \texttt{LinearNupack}), head \texttt{f90c40a} (2026-10-30 20:14), pushed to \texttt{git@github.com:gautammilan/LinearKnot.git}, where \texttt{LinearPass2} is now the default branch; tags \texttt{paper-v1} (\texttt{7c4148d}, the code of the paper runs) and \texttt{paper-v1-build} (\texttt{b0987a9}, the same code plus two untracked headers, which builds the paper binary byte for byte) are pushed too. On 2026-10-30 we made G through the multiloop states the default with $b_G=256$ (experiment H), split the 23{,}820-line source into a unity build of about 50 files (J), and deleted the code that no coverage run executes, with 182 options (J). Lazy G is about 2 times faster than linear G in total on Ther, Deha and Pseu, at different beams (I). The HXB2 1--3000 coverage run was killed for memory, so the dead-code pass has not been checked on long sequences. Later on 2026-10-30 we added the lazy G (\texttt{-{}-g-sweep lazy}, \texttt{69fc292}) and made node $K=32$ with key $u_L$ its default (K); the paper preset still uses the states sweep with $b_G=256$.
 
 \section{Paper setting (current default path)}
 The paper command is \texttt{dp03 -{}-preset accurate -{}-material rna1999 -{}-dangles some -{}-param-file dp03/params/rna1999.dG} with the binary built by \texttt{make} (\texttt{build/dp03}). The preset sets $b_1=200$, $b_2=1000$, $b_4=3000$, $b_V=256$, $b_G=256$, P beams $(b_2,b_4,b_4)=(1000,3000,3000)$, G through the multiloop states (\texttt{-{}-g-sweep states}, the built-in default), \texttt{-{}-sweep on -{}-v-sweep on}, \texttt{-{}-loop-cap 30 -{}-max-loop 30 -{}-ml-lead-cap 30}, $RT=0.6163207755$, and the stem-estimate and scan options listed in \texttt{cpp/main.cpp}. The energy model is not part of the preset. \texttt{-{}-preset default} is the same with $b_2=200$, $b_4=1000$, $b_V=512$, $b_G=16$. Experiments before 2026-10-30 (G\_hex to F) used older presets and flag names; each entry states its flags.
@@ -84,7 +85,10 @@ $b_V$ & \texttt{-{}-bV N} & Pass-2 $V$ maps (entries per pair) & 256 & 256 \\
 $b_G$ & \texttt{-{}-bG N} & Pass-2 $G$ maps (entries per state); $q'$ kept per growth read & 16 (with \texttt{-{}-pk-l2r on}) & 256 \\
 P beams & derived & $(P_1,P_2,P_3)=(b_2,b_4,b_4)$ & & 1000,3000,3000 \\
 \midrule
- & \texttt{-{}-g-sweep states} & How $G$ is built: the states sweep of pass~2 (the linear G). The other value, \texttt{direct}, is an older build we do not use & states & states \\
+ & \texttt{-{}-g-sweep states} & How $G$ is built: the states sweep of pass~2 (the linear G). \texttt{lazy}: the same hyperedges recorded in pass~2 and pulled from the scan (K). \texttt{direct} is an older build we do not use & states & states \\
+ & \texttt{-{}-bG-node K} & Lazy only: entries $q'$ kept per node, 0 = all & 32 & (states) \\
+ & \texttt{-{}-bG-node-key} & Lazy only: node ranking, \texttt{ul} $H_s[q']\,u_L(q')$ or \texttt{sbar} $H_s[q']\,\bar S_{\mathrm{pre}}(q'+1)$ & ul & (states) \\
+ & \texttt{-{}-bG-read K} & Lazy only: right ends $q'$ kept per growth read & node $K$ & (states) \\
  & \texttt{-{}-sweep on|off} & Growth reads from the pass-2 maps; \texttt{off} = the lazy path (\texttt{rec\_root} builds each root on demand through \texttt{pr\_steps} and \texttt{rec\_node}; still in the code, not run since the dead-code pass) & on & on \\
  & \texttt{-{}-v-sweep on|off} & Scan reads $V$ from the sweep & on & on \\
  & \texttt{-{}-ml-lead-cap N} & Multiloop leading unpaired run cap & 30 & 30 \\
@@ -93,14 +97,16 @@ P beams & derived & $(P_1,P_2,P_3)=(b_2,b_4,b_4)$ & & 1000,3000,3000 \\
 \end{tabular}
 \end{center}
 
-Flags renamed or removed on 2026-10-30 (entries before that date use the old names): \texttt{-{}-nest-beam} became \texttt{-{}-b1}, \texttt{-{}-beam} became \texttt{-{}-b4}, \texttt{-{}-pr-v-cap} became \texttt{-{}-bV}, \texttt{-{}-grow-node-trunc} became \texttt{-{}-bG}; \texttt{-{}-l2r-pbeam} is derived; \texttt{-{}-g-cut}, \texttt{-{}-k-exact}, \texttt{-{}-pre-beam} and 179 other options were removed (\texttt{docs/UNUSED\_CODE.md}). The run report still prints a fixed \texttt{g\_cut} field; it does not describe the states path.
+Flags renamed or removed on 2026-10-30 (entries before that date use the old names): \texttt{-{}-nest-beam} became \texttt{-{}-b1}, \texttt{-{}-beam} became \texttt{-{}-b4}, \texttt{-{}-pr-v-cap} became \texttt{-{}-bV}, \texttt{-{}-grow-node-trunc} became \texttt{-{}-bG}; \texttt{-{}-l2r-pbeam} is derived; \texttt{-{}-g-cut}, \texttt{-{}-k-exact}, \texttt{-{}-pre-beam} and 179 other options were removed (\texttt{docs/UNUSED\_CODE.md}). Since version 1.6 the \texttt{[g-read]} report line prints the G configuration (\texttt{g\_mode}, \texttt{node\_K}, \texttt{node\_key}, \texttt{read\_K}) in place of the fixed \texttt{g\_cut topq} field; at the paper preset it reads \texttt{g\_mode states node\_K 256 node\_key sbar read\_K 256}.
 
 Here $Z$ is the partition function and $\log Z$ is its natural log as printed by the binary. $|d\log Z|$ means absolute deviation from a stated reference $\log Z$.
 
 \section{Binaries}
 All built with \texttt{g++ -O3 -std=c++17 -ffp-contract=off -Wall -Wextra} (no fast-math, no FMA contraction).
 \begin{itemize}[leftmargin=*]
-  \item \textbf{CURRENT.} \texttt{build/dp03} from \texttt{make} at \texttt{f90c40a}, md5 \texttt{018486b58c2469133a1b53d12d23f355}, the same md5 as the dead-code check binary \texttt{/tmp/lp2/chk/dp03\_final3}.
+  \item \textbf{CURRENT.} \texttt{build/dp03} from \texttt{make} at the commit of version 1.6 (lazy defaults $K=32$, key $u_L$; \texttt{[g-read]} prints the G configuration), md5 \texttt{ba7344fc0dbccb5a44d3943b9a6e99fc}, copied to \texttt{/nfs/stak/users/gautammi/my-hpc-share/lp2\_lazy/bin/dp03\_lzdef}.
+  \item \textbf{DEAD-CODE CHECK.} \texttt{build/dp03} from \texttt{make} at \texttt{f90c40a}, md5 \texttt{018486b58c2469133a1b53d12d23f355}, the same md5 as the dead-code check binary \texttt{/tmp/lp2/chk/dp03\_final3}.
+  \item \textbf{LAZY G (K).} \texttt{/nfs/stak/users/gautammi/my-hpc-share/lp2\_lazy/bin/dp03\_69fc292}, \texttt{build/dp03} from \texttt{make} at \texttt{69fc292} (first \texttt{-{}-g-sweep lazy}, lazy defaults then $K=16$, key sbar; every K run states its flags), md5 \texttt{fe88d767563995fb08a914fd33f7b16b}.
   \item \textbf{PAPER (states, $b_G=256$).} \texttt{/tmp/new\_exactness/bin/dp03\_g256} and \texttt{dp03\_default} (same file), md5 \texttt{48d4b172c657d3825eef86d7a31b5793}, built 2026-10-30 14:09 from \texttt{7c4148d} (tag \texttt{paper-v1}); a clean checkout of tag \texttt{paper-v1-build} rebuilds this md5.
   \item \textbf{LAZY (G4 part A).} \texttt{LinearNupack/cpp/dp03\_cpp\_l2r\_merged\_fixlam}, md5 \texttt{6f7e4f516e57b48b129fc569cba506bc}, mtime 2026-10-29 14:51, one minute after commit \texttt{e53f948} (default \texttt{-{}-sweep off}). Build commit: \tofill{not recorded next to the binary}.
   \item \textbf{NEW (fixed sweep).} \texttt{/tmp/new\_exactness/bin/dp03\_fixlam\_sweep}, built 2026-10-29 17:41 from \texttt{cpp/dp03\_l2r\_merged.cpp} at \texttt{ca8cd5e} (NFS \texttt{cpp/dp03\_cpp\_l2r\_merged\_fixlam} was root-owned and not overwritten). md5 \texttt{335a5e6c736140eba6a5e0ba71e6fe14}, the same file as \texttt{/tmp/new\_exactness/G4/bin/dp03\_fixsw} used by G4 part D.
@@ -390,6 +396,54 @@ What linear buys for this cost: G is exact before the cut and checked against $\
   \item Not covered: the HXB2 1--3000 coverage run was killed for memory (cgroup headroom guard, after pass~2 at 6585\,s, peak 40.8\,GB), so lines that only long sequences execute may have been deleted. The exact command with pair probabilities segfaults in \texttt{outside()}, as \texttt{paper-v1} does.
 \end{itemize}
 
+\subsection{K (Lazy G: K ladder and node key)}
+\begin{itemize}[leftmargin=*]
+  \item Question: which node cap $K$ and which node ranking key does the lazy G (\texttt{-{}-g-sweep lazy}) need, and what does it cost against linear G ($b_G=256$) at the same beams?
+  \item Lazy G (\texttt{cpp/pass2/g\_lazy.hpp}, commit \texttt{69fc292}): pass~2 runs the states push with \texttt{do\_g} off and records its hyperedges and stop terms; the scan pulls $H_s[q'] = \sum_{p'} \hat C(p'-1)\,G_s[p',q']$ per node on demand, memoized, and keeps the top $K$ entries by $H_s[q']\,\bar S_{\mathrm{pre}}(q'+1)$ (key $\bar S$, \texttt{sbar}) or $H_s[q']\,u_L(q')$ (key $u_L$, \texttt{ul}); the read keeps $K_{\mathrm{read}}$ right ends ($K_{\mathrm{read}}=K$ here). Uncut checks: \texttt{make check} lazy identity on RP150, max relative error $5.684\times10^{-13}$ over 2948 pairs; uncut lazy equals uncut linear bit for bit on RP150 (116.28132371946509) and Ther (327.39782478100847).
+  \item Setup: binary LAZY G (\texttt{69fc292}), \texttt{-{}-preset accurate -{}-material rna1999 -{}-dangles some -{}-param-file rna1999.dG -{}-no-bpp}, plus \texttt{-{}-g-sweep lazy -{}-bG-node K -{}-bG-node-key sbar|ul}; linear is the same preset without the lazy flags (states, $b_G=256$). The Ther $K32\,u_L$ run also passed \texttt{-{}-bG-read 32}, which equals the default. Node cn-x-2 (\texttt{huang-grp}, 48 CPUs), one CPU per job. The $K16\,u_L$, $K24\,u_L$, $K32$ $\bar S$ and $K64$ $\bar S$ columns ran as one grid with about 46 jobs on the node at once; $K16$ $\bar S$, $K32\,u_L$ and linear ran earlier on the same node. Runs: \texttt{/nfs/stak/users/gautammi/my-hpc-share/lp2\_lazy/runs/} (\texttt{m\_*}, \texttt{t3\_*}, \texttt{t4\_*}, \texttt{lin\_*\_g256}, \texttt{g\_Ther\_k32ul\_r32}). CPU is pass~2 plus pass~3 from the \texttt{[stage]} lines.
+\end{itemize}
+
+\paragraph{K.1 $d\log Z$ against NUPACK (RP486: raw $\log Z$).}
+\begin{center}
+\footnotesize
+\begin{tabular}{@{}lrrrrrrr@{}}
+\toprule
+seq & $K16$ $\bar S$ & $K16\,u_L$ & $K24\,u_L$ & $K32$ $\bar S$ & $K32\,u_L$ & $K64$ $\bar S$ & linear $b_G256$ \\
+\midrule
+RNaseP M.mar & $-0.0078$ & $-0.0078$ & $-0.0078$ & $-0.0078$ & $-0.0078$ & $-0.0078$ & $-0.0078$ \\
+Baci.cere & $-0.1538$ & $-0.1563$ & $-0.1563$ & $-0.1560$ & $-0.1562$ & $-0.1566$ & $-0.1524$ \\
+Camp.jeju & $-0.0142$ & $-0.0132$ & $-0.0132$ & $-0.0140$ & $-0.0132$ & $-0.0132$ & $-0.0132$ \\
+Deha.ethe & $-1.5814$ & $-1.5814$ & $-1.5814$ & $-1.5814$ & $-1.5814$ & $-1.5814$ & $-1.5804$ \\
+Guil.thet & $-0.0232$ & $-0.0242$ & $-0.0237$ & $-0.0234$ & $-0.0235$ & $-0.0234$ & $-0.0233$ \\
+Lept.spec & $-0.0392$ & $-0.0396$ & $-0.0396$ & $-0.0396$ & $-0.0396$ & $-0.0396$ & $-0.0389$ \\
+List.seel & $-0.0270$ & $-0.0269$ & $-0.0269$ & $-0.0269$ & $-0.0269$ & $-0.0268$ & $-0.0269$ \\
+Neph.oliv & $-0.1344$ & $-0.1354$ & $-0.1353$ & $-0.1349$ & $-0.1353$ & $-0.1341$ & $-0.1349$ \\
+Pseu.aeru & $-0.2576$ & $-0.2551$ & $-0.2550$ & $-0.2549$ & $-0.2550$ & $-0.2525$ & $-0.2557$ \\
+Shew.frig & $-0.8018$ & $-0.7988$ & $-0.7988$ & $-0.7997$ & $-0.7988$ & $-0.7988$ & $-0.7997$ \\
+Shew.spec & $-0.4770$ & $-0.4110$ & $-0.4110$ & $-0.4252$ & $-0.4110$ & $-0.4125$ & $-0.4469$ \\
+Stre.pyog & $-0.0580$ & $-0.0570$ & $-0.0570$ & $-0.0571$ & $-0.0570$ & $-0.0570$ & $-0.0570$ \\
+Stre.ther & $-0.0927$ & $-0.0930$ & $-0.0929$ & $-0.0930$ & $-0.0929$ & $-0.0929$ & $-0.0928$ \\
+Ther.ther & $-12.7902$ & $-9.6823$ & $-0.1453$ & $-12.7592$ & $-0.1455$ & $-0.1456$ & $-0.1456$ \\
+envi.sequ-1 & $-1.0747$ & $-1.0746$ & $-1.0746$ & $-1.0744$ & $-1.0746$ & $-1.0744$ & $-1.0748$ \\
+envi.sequ-2 & $-0.0181$ & $-0.0182$ & $-0.0182$ & $-0.0182$ & $-0.0182$ & $-0.0182$ & $-0.0182$ \\
+RP486 ($\log Z$) & 440.4276 & 440.3545 & 440.3618 & 440.3570 & 440.3648 & 440.3388 & 440.3393 \\
+\midrule
+mean $|d\log Z|$ (16) & 1.0969 & 0.8984 & 0.3023 & 1.0916 & 0.3023 & 0.3022 & 0.3043 \\
+CPU p2+p3, 16 (s) & 1770 & 1863 & 2042 & 2155 & 2183 & 2704 & 5760 \\
+CPU p2+p3, 17 (s) & 2019 & 2129 & 2334 & 2447 & 2499 & 3085 & 6651 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{K.2 Findings.}
+\begin{itemize}[leftmargin=*]
+  \item Ther is the only sequence that separates the settings. At $K\le32$ recovery needs both the $u_L$ key and $K\ge24$: $K16\,u_L$ gives $-9.68$ (one seed lost) and $K32$ $\bar S$ gives $-12.76$. With $\bar S$, $K=64$ also recovers ($-0.1456$, equal to linear).
+  \item Shew.spec: every $u_L$ setting gives $-0.4110$; $\bar S$ at $K=64$ gives $-0.4125$ and linear $-0.4469$, so the key matters beyond $K$.
+  \item Default chosen: $K=32$, key $u_L$, $K_{\mathrm{read}}=K$. $K=24$ is the smallest $K$ that works on this set, but the failure is a cliff ($-0.15$ at 24, $-9.68$ at 16) seen on one sequence only, so $K=32$ keeps twice the margin over the known failure point; $K=24$ is 6.5\% cheaper (2042 against 2183\,s on the 16-sequence set). Lazy $K32\,u_L$ is 2.6 times cheaper than linear on the 16-sequence set (2183 against 5760\,s), with mean $|d\log Z|$ 0.3023 against 0.3043.
+  \item Open: Baci.cere, Lept.spec and Deha are 0.0003 to 0.0042 below linear at every $K$ and both keys, so this is not node truncation. Candidates: the read cut ($K_{\mathrm{read}}\le K$ right ends against 256 in linear) or a real recursion difference. Uncut lazy against uncut linear (T2) on these three decides; T2 already gives equal $\log Z$ bit for bit on RP150 and Ther.
+  \item Open: run Ther with $u_L$, $K=\infty$ and log the rank of the seeds $(30,202)$ and $(40,295)$ (H.2) at each node on their path, to measure the $K$ they need.
+\end{itemize}
+
 \section{ArchiveII RMSD run arch17\_vg/v256\_g32\_A}
 \tofill{path and whether that run used sweep before ca8cd5e; no arch17\_vg/v256\_g32\_A directory found under the repo or /tmp in Task~N search}.
 
@@ -413,7 +467,7 @@ We do not have on-disk evidence that the NL4-3 b4=1000${\to}$3000 $\log Z$ drop 
 The states cut ranks a pseudoknot seed by its exterior-loop score (H.2). On Ther $b_G=128$ drops both seeds ($d\log Z=-12.76$) and $b_G=256$ keeps them. Only five sequences have been run at the new default (H.3); the other 13 of the 16-sequence set and any long sequence have not.
 
 \subsection{Q3. Lazy vs linear at the same beams}
-I compares lazy at the older accurate beams ($b_2=2000$, $b_V=128$, $b_G=32$) with linear at today's ($b_2=1000$, $b_V=256$, $b_G=256$). No run has both at the same beams on the same node, so the time ratio (about 2 in total, 15 in G build) and any accuracy difference are not measured cleanly. The lazy code is still present at \texttt{f90c40a} but has not run since the dead-code pass.
+I compares lazy at the older accurate beams ($b_2=2000$, $b_V=128$, $b_G=32$) with linear at today's ($b_2=1000$, $b_V=256$, $b_G=256$). No run has both at the same beams on the same node, so the time ratio (about 2 in total, 15 in G build) and any accuracy difference are not measured cleanly. The lazy code is still present at \texttt{f90c40a} but has not run since the dead-code pass. The new lazy G (\texttt{-{}-g-sweep lazy}, K) is matched: same preset, same node, same binary as linear; $K32\,u_L$ is 2.6 times cheaper in pass~2 plus pass~3 on the 16-sequence set at mean $|d\log Z|$ 0.3023 against 0.3043. That comparison is for \texttt{-{}-g-sweep lazy} only, not for the older \texttt{-{}-sweep off} path.
 
 \subsection{Q4. Smaller gaps}
 The exact command with pair probabilities segfaults in \texttt{outside()} (J). The exact references have no commit (reference section).
@@ -424,7 +478,9 @@ The exact command with pair probabilities segfaults in \texttt{outside()} (J). T
   \item Run lazy (\texttt{-{}-sweep off}, binary of tag \texttt{paper-v1}) and linear at identical beams, one job per node, on Ther, Deha, Pseu and RP486 (Q3).
   \item Finish the HXB2 1--3000 coverage check of the dead-code pass, or rerun it with more memory headroom, and restore any line only it executes (J).
   \item Revisit Q1 only with a logged $b_2$ ablation on NL4-3, or locate the original HIV run directory.
-  \item Print the G mode in the run report instead of the fixed \texttt{g\_cut} field.
+  \item Uncut lazy against uncut linear on Baci.cere, Lept.spec and Deha, to place their 0.0003 to 0.0042 gap (K.2).
+  \item Ther with $u_L$, $K=\infty$: seed ranks of $(30,202)$ and $(40,295)$ along their paths (K.2).
+  \item HXB2 1--1000, 1--2000, 1--3000, lazy $K32\,u_L$ against linear: time, memory and nodes per nucleotide (running at version 1.6).
 \end{enumerate}
 
 \end{document}

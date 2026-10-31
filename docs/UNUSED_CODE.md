@@ -42,7 +42,8 @@ A line counts as executed if any run executed it (union of the gcov counts).
   expansion no longer emits the three preset options. The removed list is below.
 - Members or globals that no run writes were folded to their constant value. Report lines keep
   their text: where a removed variable was printed, the constant is printed instead (for
-  example `diag 0 U_nobml 0` in `[growth]`, `g_cut topq`), so report fields stay the same.
+  example `diag 0 U_nobml 0` in `[growth]`), so report fields stay the same. The `g_cut topq`
+  field of `[g-read]` was later replaced by `g_mode node_K node_key read_K`.
   On RP150 stderr differs from the stored run only in the `[preset] expanded:` line, the
   `[deviation]` lines of removed features (gate, arm score, access, max_gap_scan, max_arm_len,
   v-floor, v-cut-fb) and timings / RSS.

@@ -31,7 +31,7 @@ Never add `-ffast-math` or FMA contraction: results are compared bit for bit.
 | 2 | Q^z_pre (gap partition function) kept starts; nested tables Qb, Qm, Qm2, Qmp, Qp of the scan | b2 | `--b2` | `table_beam[BT_QB..BT_QP]`, `b2_width` |
 | 2 | V^pre: future partner-stem profile, entries x_s.y_s per pair, cut by V S̄_pre[y_s+1] | b_V | `--bV` | `pr_vcap`, `p2_v_cap` |
 | 2 | G (growth table G_L, Ĝ): entries (p', q') per state, cut by C_pre(p'-1) G S̄_pre(q'+1) | b_G | `--bG` | `g_ntr_K` |
-| 2 / 3 | lazy G (`--g-sweep lazy`): pass 2 records the same hypergraph; the scan pulls H_s(q') = Σ_p' Ĉ(p'-1) G_s(p', q') per node, cut by H S̄_pre(q'+1); the read keeps K_read right ends | K, K_read | `--bG-node`, `--bG-read` | `g_lz_K`, `g_ntr_K` |
+| 2 / 3 | lazy G (`--g-sweep lazy`): pass 2 records the same hypergraph; the scan pulls H_s(q') = Σ_p' Ĉ(p'-1) G_s(p', q') per node, cut by H u_L(q') (`--bG-node-key ul`, default; `sbar`: H S̄_pre(q'+1)); the read keeps K_read right ends. `[g-read]` prints `g_mode node_K node_key read_K` | K (default 32), K_read (default K) | `--g-sweep lazy`, `--bG-node`, `--bG-node-key sbar\|ul`, `--bG-read` | `g_lz_K`, `g_lz_key`, `g_ntr_K` |
 | 3 | L2R scan (LR-DP03 inside, `--pk-l2r on`): 4-index pseudoknot states ranked by the pass-2 reads | b4 | `--b4` | `beam`, `l2r_beam`, `rlt_beam` |
 | 3 | scan partial states P1, P2, P3 | (b2, b4, b4) | derived | `l2r_pbeam`, `l2r_tb[PT_P1..]` |
 

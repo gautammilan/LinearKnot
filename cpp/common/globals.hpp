@@ -40,9 +40,9 @@ static int g_ntr_K = 0;
 enum { G_SWEEP_DIRECT = 0, G_SWEEP_STATES = 1, G_SWEEP_LAZY = 2 };
 static int g_sweep = G_SWEEP_STATES;
 // --g-sweep lazy: --bG-node K keeps K entries q' per node (0: all), ranked by
-// H[q'] Sbar_pre(q'+1) (--bG-node-key sbar) or H[q'] u_L(q') (ul); --bG-read K_read sets b_G
-// (g_ntr_K) for the read, default K.
-static int g_lz_K = 16, g_lz_Kread = -1, g_lz_key = 0;
+// H[q'] u_L(q') (--bG-node-key ul, default) or H[q'] Sbar_pre(q'+1) (sbar); --bG-read K_read
+// sets b_G (g_ntr_K) for the read, default K. Ther.ther needs ul and K >= 24.
+static int g_lz_K = 32, g_lz_Kread = -1, g_lz_key = 1;
 static const char* g_sweep_name() {
   return g_sweep == G_SWEEP_DIRECT ? "direct" : g_sweep == G_SWEEP_LAZY ? "lazy" : "states";
 }

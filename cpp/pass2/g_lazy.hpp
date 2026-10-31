@@ -5,7 +5,7 @@
 //   stop'_{x.y}[y] = Chat(x-1) at(x, y)   (end_ok),
 // over the hypergraph sw_hyper_push records (StemEst::lz*), so the edges are those of
 // --g-sweep states. A node is built when the first root that reaches it is read, memoized,
-// and cut to its top K entries by H_s[q'] Sbar_pre(q'+1) (--bG-node-key ul: H_s[q'] u_L(q')).
+// and cut to its top K entries by H_s[q'] u_L(q') (--bG-node-key sbar: H_s[q'] Sbar_pre(q'+1)).
 // Uncut with Chat = C_pre, sum_q' H_{x.y}[q'] Sbar_pre(q'+1) = Qb_b(x, y) (lz_out_id).
 //
 // Fragment of the unity build: #included by cpp/main.cpp at this point of the original

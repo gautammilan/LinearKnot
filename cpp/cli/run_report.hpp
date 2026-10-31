@@ -231,12 +231,18 @@
                               : 0.0;
         const double work_per_out =
             mean_out > 0.0 ? mean_in / mean_out : 0.0;
+        // node_key: sbar = C*G*Sbar_pre(q'+1), ul = C*G*u_L(q'); C is C_pre except lazy (Chat).
+        const bool lazy = (g_sweep == G_SWEEP_LAZY);
+        const char* node_key =
+            lazy ? (g_lz_key == 1 ? "ul" : "sbar") : (g_sweep == G_SWEEP_DIRECT ? "ul" : "sbar");
         std::fprintf(stderr,
-                     "[g-read] n %d bG %d g_sweep %s ntr_init_sec %.6f sw_fill_sec %.6f "
+                     "[g-read] n %d g_mode %s node_K %d node_key %s read_K %d ntr_init_sec %.6f "
+                     "sw_fill_sec %.6f "
                      "sw_as_rn_calls %lld sw_as_rn_sec %.6f ms_per_read %.4f ent_in_mean %.1f "
                      "ent_out_mean %.1f work_per_out %.1f ga_nodes %lld ga_ent_mean %.1f "
                      "ga_ent_max %lld rn_keys %lld grow_sec %.6f\n",
-                     static_cast<int>(seq.size()), g_ntr_K, g_sweep_name(), dp.sw_ntr_init_sec, dp.sw_fill_sec,
+                     static_cast<int>(seq.size()), g_sweep_name(), lazy ? g_lz_K : g_ntr_K, node_key,
+                     g_ntr_K, dp.sw_ntr_init_sec, dp.sw_fill_sec,
                      dp.sw_as_rn_calls, dp.sw_as_rn_sec,
                      dp.sw_as_rn_calls > 0 ? 1e3 * dp.sw_as_rn_sec / static_cast<double>(dp.sw_as_rn_calls)
                                           : 0.0,
