@@ -19,11 +19,12 @@ inline int log_add_exp2(double a) {
 //
 // Two early outs before the transcendental pair, both of which return a bit for bit:
 //   b - a <= -50 is the cheap one (exp underflows into the rounding of a anyway);
-//   b - a < (e_a - 55) ln 2 is the ulp one: a quarter ulp of a is 2^(e_a - 55), and adding
-//   anything below a quarter ulp to a rounds back to a for every rounding mode we build with
-//   (log1p(x) < 1.01x for x < 1e-16, so the term stays under a quarter ulp).
-// The comparison is done in the d/ln 2 form to keep it to one multiply; the factor 4 margin
-// between the quarter-ulp bound and the half-ulp rounding threshold absorbs its rounding.
+//   b - a < (e_a - 55) ln 2 is the ulp one: with a in [2^e, 2^(e+1)) the spacing is
+//   2^(e-52), so exp(d) < 2^(e-55) = ulp(a)/8 and, log1p(x) < 1.01x, the term stays below
+//   ulp(a)/4 -- inside the half-spacing at which a + t would round away from a. The factor 2
+//   between the bound and that threshold absorbs the rounding of the comparison and of the
+//   constant.
+// The comparison is done in the d/ln 2 form to keep it to one multiply.
 // -inf, +inf, 0, subnormals and NaN all fall through to the slow path unchanged.
 inline double log_add(double a, double b) {
   if (a < b) std::swap(a, b);
