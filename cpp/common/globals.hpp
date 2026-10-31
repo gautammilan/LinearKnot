@@ -37,8 +37,15 @@ static double g_tr_eps = 1e-6;
 // keeps one layer-summed list per side, its top K entries by --grow-trunc's ranking at build
 // time, built from its terms' lists; the full layer vectors are never stored.
 static int g_ntr_K = 0;
-enum { G_SWEEP_DIRECT = 0, G_SWEEP_STATES = 1 };
+enum { G_SWEEP_DIRECT = 0, G_SWEEP_STATES = 1, G_SWEEP_LAZY = 2 };
 static int g_sweep = G_SWEEP_STATES;
+// --g-sweep lazy: --bG-node K keeps K entries q' per node (0: all), ranked by
+// H[q'] Sbar_pre(q'+1) (--bG-node-key sbar) or H[q'] u_L(q') (ul); --bG-read K_read sets b_G
+// (g_ntr_K) for the read, default K.
+static int g_lz_K = 16, g_lz_Kread = -1, g_lz_key = 0;
+static const char* g_sweep_name() {
+  return g_sweep == G_SWEEP_DIRECT ? "direct" : g_sweep == G_SWEEP_LAZY ? "lazy" : "states";
+}
 // --out-id: compare reconstructed outsides to pass-1 Qb_b. Stop term uses E.at,
 // the exterior-loop pair factor pass 1 adds into Qb_b (this check only; production seed is the same E.at).
 static bool g_out_id = false;

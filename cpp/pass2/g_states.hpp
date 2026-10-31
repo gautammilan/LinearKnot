@@ -8,13 +8,36 @@
 
   void sw_hyper_push(StemEst& st) {
     using Ga = std::unordered_map<uint64_t, double>;
+    // id: the state's node in the lazy G hypergraph (-1: no G reaches it, or not lazy).
     struct M {
       Ga g, v, b;
-      bool empty() const { return g.empty() && v.empty() && b.empty(); }
+      int id = -1;
+      bool empty() const { return g.empty() && v.empty() && b.empty() && id < 0; }
     };
     // Nested pre-pass has l2r_mode==0 (scan's --pk-l2r does not apply here). Multi edges E3/E4
-    // multi fire on that path. --g-sweep states turns G on beside V.
+    // multi fire on that path. --g-sweep states turns G on beside V; --g-sweep lazy records
+    // the edges G would be pushed along (child, parent, log w_e) instead of pushing maps.
     const bool do_g = (g_sweep == G_SWEEP_STATES);
+    const bool lz = (g_sweep == G_SWEEP_LAZY);
+    std::vector<int> lz_ec, lz_ep;
+    std::vector<double> lz_ew;
+    int lz_n = 0;
+    std::vector<int> lz_sx, lz_sy;
+    std::vector<double> lz_sw;
+    auto lz_node = [&](M& d) {
+      if (d.id >= 0) return;
+      d.id = lz_n++;
+      lz_sx.push_back(-1);
+      lz_sy.push_back(-1);
+      lz_sw.push_back(NEG_INF);
+    };
+    auto lz_edge = [&](M& d, const M& s, double a) {
+      if (a < HALF_NEG || s.id < 0) return;
+      lz_node(d);
+      lz_ec.push_back(d.id);
+      lz_ep.push_back(s.id);
+      lz_ew.push_back(a);
+    };
     const bool do_v = p2_vsweep;
     const int Kg = g_ntr_K, Kv = p2_v_cap;
     const double a1 = E.w_alpha1, a2 = E.w_alpha2, a3 = E.w_alpha3;
@@ -44,6 +67,7 @@
       }
     } g_at, v_at, g_pre, v_pre, g_kept, v_kept;
     auto scale_into = [&](M& d, const M& s, double a) {
+      if (lz) lz_edge(d, s, a);
       if (a < HALF_NEG || s.empty()) return;
       auto one = [&](Ga& dd, const Ga& ss, double& sec, long long* cnt, Hist* hist) {
         if (ss.empty()) return;
@@ -223,6 +247,11 @@
     std::unordered_map<uint64_t, M> pairs;
     auto run_mix = [&](M& closed, const M* u1n, const M* u2n, int j, double w, M& ou1, M& ou2) {
       M p = closed;
+      // p = closed + w u1n is a new node when u1n carries G; a and b below read the old closed.
+      if (lz && u1n && u1n->id >= 0 && w > HALF_NEG) {
+        p.id = -1;
+        lz_edge(p, closed, 0.0);
+      }
       if (u1n) scale_into(p, *u1n, w);
       M a, b;
       scale_into(a, closed, E.s1w[j]);
@@ -443,6 +472,12 @@
           // Exterior-loop pair factor. --out-id uses pass 1's E.at, which is also the production seed.
           const double e_out = E.at(i, j);
           if (do_g) add1(m.g, key2(i, j), e_out);
+          if (lz && e_out > HALF_NEG) {
+            lz_node(m);
+            lz_sx[static_cast<size_t>(m.id)] = i;
+            lz_sy[static_cast<size_t>(m.id)] = j;
+            lz_sw[static_cast<size_t>(m.id)] = e_out;
+          }
           if (do_v) {
             const double sb = st.prS[static_cast<size_t>(j + 1)];
             if (sb > HALF_NEG) add1(m.v, key2(i, 0), e_out + sb);
@@ -503,11 +538,13 @@
     st.prGamma.clear();
     st.prMu.clear();
     st.prMuFloor.clear();
+    st.lzPair.clear();
     for (auto& [k, m] : pairs) {
       const int px = k_hi(k), py = k_lo(k);
       ++hk_map[2];
       if (py < 0 || py >= n || !Qb_at[py].has(px)) ++hk_bad[2];
       if (do_g && !m.g.empty()) st.prGamma.emplace(k, std::move(m.g));
+      if (lz && m.id >= 0) st.lzPair.emplace(k, m.id);
       if (do_v && !m.v.empty()) {
         double mn = NEG_INF;
         bool any = false;
@@ -521,6 +558,35 @@
         if (any) st.prMuFloor.emplace(k, mn);
         st.prMu.emplace(k, std::move(m.v));
       }
+    }
+    if (lz) {
+      const auto ti = std::chrono::steady_clock::now();
+      const size_t ne = lz_ec.size();
+      st.lzOff.assign(static_cast<size_t>(lz_n) + 1, 0);
+      for (int c : lz_ec) ++st.lzOff[static_cast<size_t>(c) + 1];
+      for (size_t s = 0; s < static_cast<size_t>(lz_n); ++s) st.lzOff[s + 1] += st.lzOff[s];
+      st.lzPar.assign(ne, -1);
+      st.lzW.assign(ne, NEG_INF);
+      std::vector<size_t> fill(st.lzOff.begin(), st.lzOff.end() - 1);
+      for (size_t e = 0; e < ne; ++e) {
+        const size_t at = fill[static_cast<size_t>(lz_ec[e])]++;
+        st.lzPar[at] = lz_ep[e];
+        st.lzW[at] = lz_ew[e];
+      }
+      std::vector<int>().swap(lz_ec);
+      std::vector<int>().swap(lz_ep);
+      std::vector<double>().swap(lz_ew);
+      st.lzStopX = std::move(lz_sx);
+      st.lzStopY = std::move(lz_sy);
+      st.lzStopW = std::move(lz_sw);
+      st.lz_index_sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - ti).count();
+      std::fprintf(stderr, "[g-lazy-index] nodes %d edges %zu pairs %zu mb %.1f csr_sec %.3f\n", lz_n, ne,
+                   st.lzPair.size(),
+                   (8.0 * static_cast<double>(st.lzOff.size()) + 12.0 * static_cast<double>(ne) +
+                    16.0 * static_cast<double>(lz_n)) /
+                       1048576.0,
+                   st.lz_index_sec);
+      if (g_out_id) lz_out_id(st);
     }
     st.pr_sw_states_g = st_g;
     st.pr_sw_states_v = st_v;

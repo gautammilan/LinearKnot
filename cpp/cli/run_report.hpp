@@ -232,16 +232,26 @@
         const double work_per_out =
             mean_out > 0.0 ? mean_in / mean_out : 0.0;
         std::fprintf(stderr,
-                     "[g-read] n %d bG %d g_cut %s ntr_init_sec %.6f sw_fill_sec %.6f "
+                     "[g-read] n %d bG %d g_sweep %s ntr_init_sec %.6f sw_fill_sec %.6f "
                      "sw_as_rn_calls %lld sw_as_rn_sec %.6f ms_per_read %.4f ent_in_mean %.1f "
                      "ent_out_mean %.1f work_per_out %.1f ga_nodes %lld ga_ent_mean %.1f "
                      "ga_ent_max %lld rn_keys %lld grow_sec %.6f\n",
-                     static_cast<int>(seq.size()), g_ntr_K, "topq", dp.sw_ntr_init_sec, dp.sw_fill_sec,
+                     static_cast<int>(seq.size()), g_ntr_K, g_sweep_name(), dp.sw_ntr_init_sec, dp.sw_fill_sec,
                      dp.sw_as_rn_calls, dp.sw_as_rn_sec,
                      dp.sw_as_rn_calls > 0 ? 1e3 * dp.sw_as_rn_sec / static_cast<double>(dp.sw_as_rn_calls)
                                           : 0.0,
                      mean_in, mean_out, work_per_out, dp.sw_ga_nodes, mean_ga, dp.sw_ga_ent_max,
                      dp.rn_keys, dp.pr_grow_sec);
+        if (g_sweep == G_SWEEP_LAZY)
+          std::fprintf(stderr,
+                       "[g-lazy] n %d K %d K_read %d key %s nodes %zu edges %zu index_sec %.3f "
+                       "built %lld pulled %lld ent_mean %.2f late %lld pull_sec %.3f grow_sec %.3f\n",
+                       static_cast<int>(seq.size()), g_lz_K, g_ntr_K, g_lz_key == 1 ? "ul" : "sbar",
+                       stem.lzStopX.size(), stem.lzPar.size(), stem.lz_index_sec, dp.lzm.built,
+                       dp.lzm.pulled,
+                       dp.lzm.built > 0 ? static_cast<double>(dp.lzm.ents) / static_cast<double>(dp.lzm.built)
+                                        : 0.0,
+                       dp.lzm.late, dp.lzm.sec, dp.pr_grow_sec);
         auto meanll = [](long long s, long long n) {
           return n > 0 ? static_cast<double>(s) / static_cast<double>(n) : 0.0;
         };

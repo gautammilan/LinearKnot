@@ -31,9 +31,12 @@
 // --b4 N: four-index scan beam (was --beam). Unset: 1000 under --pk-l2r on defaults, else 0.
 // --bV N: V left-end cap per map. Sets both p2_v_cap and pr_vcap.
 // --bG N: growth node trunc K. Unset: 16.
-// --g-sweep direct|states (default states): how G is built for growth reads.
+// --g-sweep direct|states|lazy (default states): how G is built for growth reads.
 //   direct = sw_fill (pair→pair via PrMbar); states = sw_hyper_push do_g on Qm/Qm2/pair (E1–E9),
 //   cut every state to bG entries by C_pre*G*S_pre; scan still applies Chat at read.
+//   lazy = the same edges recorded in pass 2, pulled from the scan with Chat summed in at every
+//   node (pass2/g_lazy.hpp); --bG-node K (default 16), --bG-read K_read (default K),
+//   --bG-node-key sbar|ul.
 // --b1 N: the nested pre-pass and the stem-estimate run at every length.
 //   Unset: 200, independent of --b4. 0 keeps every state.
 // Removed (error if passed): --beam.
@@ -96,6 +99,7 @@ class DP03 {
 #include "pass3/scan_driver.hpp"
 #include "pass1/prepass_products.hpp"
 #include "pass2/g_states.hpp"
+#include "pass2/g_lazy.hpp"
 #include "pass3/rank_options.hpp"
 #include "common/dp03_state.hpp"
 #include "pass3/rank_stem_variants.hpp"
@@ -137,7 +141,7 @@ std::string normalize(const std::string& s) {
 void usage() {
   std::fprintf(stderr,
                "usage: dp03_cpp [--preset default|accurate] [--b1 N] [--b2 N] [--b4 N] [--bV N] [--bG N] "
-               "[--g-sweep direct|states] [--loop-cap L] [--ml-lead-cap N|n] [--max-loop M] "
+               "[--g-sweep direct|states|lazy] [--bG-node K] [--bG-read K] [--bG-node-key sbar|ul] [--loop-cap L] [--ml-lead-cap N|n] [--max-loop M] "
                "[--rt RT] [--wc-ends] [--cutoff C] [--no-bpp] [--gap-beam group|step] "
                "[--material dp03|rna1999|vienna2004 [--param-file PATH] [--dangles none|some|all|d2]] "
                "< sequences\n");

@@ -9,7 +9,7 @@ beams, and the reference text.
 
 ```
 make            # build/dp03, flags of paper-v1: -O3 -std=c++17 -ffp-contract=off -Wall -Wextra
-make check      # V and G outside identity on RNase P D. radiodurans 1-150 (see below)
+make check      # V, G (states) and G (lazy) outside identity on RNase P D. radiodurans 1-150 (see below)
 ```
 
 `cpp/main.cpp` is a unity build: it `#include`s the parts in the order of the original single
@@ -31,6 +31,7 @@ Never add `-ffast-math` or FMA contraction: results are compared bit for bit.
 | 2 | Q^z_pre (gap partition function) kept starts; nested tables Qb, Qm, Qm2, Qmp, Qp of the scan | b2 | `--b2` | `table_beam[BT_QB..BT_QP]`, `b2_width` |
 | 2 | V^pre: future partner-stem profile, entries x_s.y_s per pair, cut by V S̄_pre[y_s+1] | b_V | `--bV` | `pr_vcap`, `p2_v_cap` |
 | 2 | G (growth table G_L, Ĝ): entries (p', q') per state, cut by C_pre(p'-1) G S̄_pre(q'+1) | b_G | `--bG` | `g_ntr_K` |
+| 2 / 3 | lazy G (`--g-sweep lazy`): pass 2 records the same hypergraph; the scan pulls H_s(q') = Σ_p' Ĉ(p'-1) G_s(p', q') per node, cut by H S̄_pre(q'+1); the read keeps K_read right ends | K, K_read | `--bG-node`, `--bG-read` | `g_lz_K`, `g_ntr_K` |
 | 3 | L2R scan (LR-DP03 inside, `--pk-l2r on`): 4-index pseudoknot states ranked by the pass-2 reads | b4 | `--b4` | `beam`, `l2r_beam`, `rlt_beam` |
 | 3 | scan partial states P1, P2, P3 | (b2, b4, b4) | derived | `l2r_pbeam`, `l2r_tb[PT_P1..]` |
 
@@ -73,7 +74,8 @@ deleted (code no run executes, 181 options) and what was kept.
 | `pass2/arms.hpp` | arms: arm_raw / arm_phi give K^pre_L(q'; b, c) = Σ_{f>q'} Q^z_pre(q'+1, f-1) V, S̄_pk; argmax index, arm queries (pr_armq), arm selection (pr_select) | M eq:pra, eq:prK; P2 Phase 0 e) |
 | `pass2/reads_k.hpp` | principled-B reads W, T, K_L, S_L / S_R, U_L / U_R and growth selection; the paper path runs only pr_ub_init and pr_ls_closings (it reads K_L through the scan's lK) | M sec:prstop, eq:prW, eq:prT, eq:prSL, eq:prK, eq:prSR, sec:prbound |
 | `pass2/reads_v.hpp` | growth roots and keys read from V (`--grow-r-from-v`: rfv_root, rfv_key) | M sec:prG |
-| `pass2/g_states.hpp` | G through the multiloop states (paper default); the b_G cut by C_pre(p'-1) G S̄_pre(q'+1) is cap_ga here | M sec:prG, eq:prG, eq:prR; P2 Phase 0 d) |
+| `pass2/g_states.hpp` | G through the multiloop states (paper default); the b_G cut by C_pre(p'-1) G S̄_pre(q'+1) is cap_ga here. Under `--g-sweep lazy` the same loop records the edges (child, parent, w_e) and the stop terms into StemEst::lz* instead of pushing G maps | M sec:prG, eq:prG, eq:prR; P2 Phase 0 d) |
+| `pass2/g_lazy.hpp` | lazy G: lz_get pulls H_s(q') = stop'_s(q') + Σ_{e: t→s} w_e H_t(q') on demand (explicit stack, memoized, cut to K by H S̄_pre(q'+1) or H u_L(q')); lz_out_id is the `--out-id` identity with Ĉ = C_pre | M sec:prG |
 | `pass2/g_accum.hpp` | per-state G accumulators (racc_*, ntr_init) and the rec_* growth recursion | M eq:prKls, eq:prKrs |
 | `pass2/sweep.hpp` | the linear V / G sweep (`--sweep on`), `--out-id` identity | |
 | `pass2/reads_eval.hpp` | Ĝ reads for pass 3 (rec_root, rec_key), truncation, pr_eval* | M sec:prscore |
@@ -99,4 +101,6 @@ deleted (code no run executes, 181 options) and what was kept.
 pass-2 tables and compares it with pass 1's Q^b_b:
 Σ_{p', q'} C_pre(p'-1) G(p', q') S̄_pre(q'+1) = Q^b_b(x, y), and the same for V. With b_V and
 b_G uncapped on RNase P D. radiodurans 1-150 both hold to max relative error 7.8e-13 (V) and
-7.4e-13 (G states). `make check` runs it and fails above 1e-9.
+7.4e-13 (G states). Under `--g-sweep lazy --bG-node 0` (in `pass2/g_lazy.hpp`) the check is
+Σ_{q'} H_{x·y}(q') S̄_pre(q'+1) = Q^b_b(x, y) with C_pre as the prefix: 5.7e-13. `make check`
+runs all three and fails above 1e-9.

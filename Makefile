@@ -14,7 +14,7 @@ $(BIN): $(SRCS)
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -o $@ cpp/main.cpp
 
-# V and G outside identity at the paper preset, b_V and b_G uncapped (about 1 min, 0.6 GB).
+# V and G outside identity at the paper preset, b_V and b_G uncapped, linear and lazy G (about 1.5 min, 0.6 GB).
 check: $(BIN)
 	tests/identity_check.sh $(BIN) $(PARAM_FILE)
 

@@ -49,6 +49,15 @@ struct StemEst {
   std::unordered_map<uint64_t, double> prMuFloor;
   long long pr_sw_states_g = 0, pr_sw_states_v = 0, pr_sw_pushes = 0;
   double pr_sw_sec = 0;
+  // --g-sweep lazy: the G hypergraph sw_hyper_push walks, child-major. The parents of node s
+  // are lzPar[lzOff[s] .. lzOff[s+1]) with log edge weights lzW; a pair node x.y with end_ok
+  // has the stop term log at(x, y) in lzStopW, at lzStopX = x, lzStopY = y (lzStopX -1: none).
+  // lzPair: pair key -> node. pull: pass2/g_lazy.hpp.
+  std::vector<size_t> lzOff;
+  std::vector<int> lzPar, lzStopX, lzStopY;
+  std::vector<double> lzW, lzStopW;
+  std::unordered_map<uint64_t, int> lzPair;
+  double lz_index_sec = 0.0;
   // The nested inside log Qb of every pair.
   std::vector<double> prQbIn;
   std::vector<char> prKept;

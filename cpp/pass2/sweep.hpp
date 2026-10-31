@@ -31,6 +31,10 @@
           sw_ga_ent_sum += e;
           if (e > sw_ga_ent_max) sw_ga_ent_max = e;
         }
+      } else if (g_sweep == G_SWEEP_LAZY) {
+        sw_filled = false;
+        lzm.reset(stem_->lzStopX.size());
+        if (g_lz_key == 1) ntr_init();
       } else {
         // --g-sweep states: G already in stem_->prGamma from sw_hyper_push.
         // Fill time is the G merge+cut copied onto this DP from the nested pass.
@@ -292,6 +296,16 @@
     if (sw_filled) {
       auto it = sw_ga[inner ? 1 : 0].find(key2(x, y));
       if (it != sw_ga[inner ? 1 : 0].end()) src = &it->second;
+    } else if (g_sweep == G_SWEEP_LAZY) {
+      // H_{x.y}[q'] has Chat(p'-1) summed in already.
+      if (stem_ && !lzm.state.empty()) {
+        auto it = stem_->lzPair.find(key2(x, y));
+        if (it != stem_->lzPair.end()) {
+          const auto& h = lz_get(*stem_, lzm, it->second, C, g_lz_K, g_lz_key, cur_j);
+          sw_as_rn_ent_in += static_cast<long long>(h.size());
+          for (const auto& [q, g] : h) byq.emplace(q, g);
+        }
+      }
     } else if (stem_ && !stem_->prGamma.empty()) {
       git = stem_->prGamma.find(key2(x, y));
       if (git != stem_->prGamma.end()) src = &git->second;

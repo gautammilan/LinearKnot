@@ -276,8 +276,24 @@
       const std::string s = next();
       if (s == "direct") g_sweep = G_SWEEP_DIRECT;
       else if (s == "states") g_sweep = G_SWEEP_STATES;
+      else if (s == "lazy") g_sweep = G_SWEEP_LAZY;
       else {
-        std::fprintf(stderr, "--g-sweep must be direct or states\n");
+        std::fprintf(stderr, "--g-sweep must be direct, states or lazy\n");
+        return 2;
+      }
+    }
+    else if (arg == "--bG-node") {
+      g_lz_K = std::atoi(next());
+    }
+    else if (arg == "--bG-read") {
+      g_lz_Kread = std::atoi(next());
+    }
+    else if (arg == "--bG-node-key") {
+      const std::string s = next();
+      if (s == "sbar") g_lz_key = 0;
+      else if (s == "ul") g_lz_key = 1;
+      else {
+        std::fprintf(stderr, "--bG-node-key must be sbar or ul\n");
         return 2;
       }
     }

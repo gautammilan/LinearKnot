@@ -22,6 +22,7 @@
     if (!given("--l2r-p3-lin")) l2r_p3_lin = true;
     if (!given("--pr-ml-span")) pr_ml_span = 100000;
     if (!given("--bG")) g_ntr_K = 16;
+    if (g_sweep == G_SWEEP_LAZY) g_ntr_K = g_lz_Kread >= 0 ? g_lz_Kread : g_lz_K;
     if (!given("--grow-node-trunc-r")) g_ntr_KR = -1;
     if (!given("--pr-v-key") && (pr_fast > 0))
       pr_vxs = true;
@@ -101,6 +102,10 @@
   }
   if (g_tr_K < 0 || (g_tr_K > 0 && !pr_gsel)) {
     std::fprintf(stderr, "--grow-trunc K >= 0 needs --pr-grow-select bound\n");
+    return 2;
+  }
+  if (g_sweep == G_SWEEP_LAZY && (g_lz_K < 0 || pk_l2r != 1 || !p2_sweep || g_trace_p >= 0)) {
+    std::fprintf(stderr, "--g-sweep lazy needs --bG-node K >= 0, --pk-l2r on, --sweep on, no --g-trace\n");
     return 2;
   }
   if (g_ntr_K < 0 || (g_ntr_K > 0 && pk_l2r != 1)) {
@@ -214,9 +219,12 @@
     };
     const int bV = p2_v_cap > 0 ? p2_v_cap : pr_vcap;
     const char* bVsrc = "bV";
-    std::fprintf(stderr, "[beams] n %d b1 %d b2 %d b4 %d bV %d bG %d pbeam %d,%d,%d\n", n,
+    std::fprintf(stderr, "[beams] n %d b1 %d b2 %d b4 %d bV %d bG %d pbeam %d,%d,%d g_sweep %s\n", n,
                  nest_beam, b2_width, beam, bV, g_ntr_K, l2r_pbeam[0], l2r_pbeam[1],
-                 l2r_pbeam[2]);
+                 l2r_pbeam[2], g_sweep_name());
+    if (g_sweep == G_SWEEP_LAZY)
+      std::fprintf(stderr, "[beams] pass3 G.node idx 2 beam bG-node %d active %d key %s\n", g_lz_K,
+                   g_lz_K > 0 ? 1 : 0, g_lz_key == 1 ? "ul" : "sbar");
     if (stem_rank) nest_tables("stem", nest_beam);
     if (stem_pr) {
       nest_tables("pass1", nest_beam);
