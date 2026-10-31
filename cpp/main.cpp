@@ -31,7 +31,8 @@
 // --b4 N: four-index scan beam (was --beam). Unset: 1000 under --pk-l2r on defaults, else 0.
 // --bV N: V left-end cap per map. Sets both p2_v_cap and pr_vcap.
 // --bG N: growth node trunc K. Unset: 16.
-// --g-sweep direct|states|lazy (default states): how G is built for growth reads.
+// --g-sweep direct|states|lazy (default lazy; states if unset and lazy cannot run, i.e. no
+//   --pk-l2r on, --sweep off or --g-trace): how G is built for growth reads. states = paper-v1.
 //   direct = sw_fill (pair→pair via PrMbar); states = sw_hyper_push do_g on Qm/Qm2/pair (E1–E9),
 //   cut every state to bG entries by C_pre*G*S_pre; scan still applies Chat at read.
 //   lazy = the same edges recorded in pass 2, pulled from the scan with Chat summed in at every

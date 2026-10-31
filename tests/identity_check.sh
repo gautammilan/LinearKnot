@@ -1,5 +1,5 @@
 #!/bin/bash
-# V and G outside identity (--out-id) at the paper preset with b_V and b_G uncapped:
+# V and G outside identity (--out-id) at the paper preset, --g-sweep states, b_V and b_G uncapped:
 # sum_{p',q'} C_pre(p'-1) G(p',q') Sbar_pre(q'+1) = Qb_b(x,y) for every kept pair, same for V;
 # and the lazy G (--g-sweep lazy, uncut): sum_q' H_{x.y}[q'] Sbar_pre(q'+1) = Qb_b(x,y) with
 # C_pre as the prefix.
@@ -15,7 +15,7 @@ ERR=$(mktemp)
 ERRL=$(mktemp)
 trap 'rm -f "$ERR" "$ERRL"' EXIT
 "$BIN" --preset accurate --material rna1999 --dangles some --param-file "$PF" \
-  --bV 10000000 --bG 10000000 --out-id --no-bpp < "$FA" > /dev/null 2> "$ERR"
+  --bV 10000000 --g-sweep states --bG 10000000 --out-id --no-bpp < "$FA" > /dev/null 2> "$ERR"
 "$BIN" --preset accurate --material rna1999 --dangles some --param-file "$PF" \
   --bV 10000000 --g-sweep lazy --bG-node 0 --bG-read 10000000 --out-id --no-bpp < "$FA" > /dev/null 2> "$ERRL"
 status=0

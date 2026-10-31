@@ -1,4 +1,4 @@
-// Pass 2 / scan, G through the multiloop states pulled on demand (--g-sweep lazy). With Chat
+// Pass 2 / scan, G through the multiloop states pulled on demand (--g-sweep lazy, default). With Chat
 // the exterior prefix of the reading DP (the scan's C), every node s keeps one weight per
 // right end q':
 //   H_s[q'] = sum_p' Chat(p'-1) G_s[p', q'] = stop'_s[q'] + sum_{e: t -> s} w_e H_t[q'],

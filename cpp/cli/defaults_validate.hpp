@@ -7,6 +7,18 @@
   // --pk-l2r on defaults: --l2r-spawn inc; pbeam derived below as (b2,b4,b4);
   // --l2r-p3-hex/lin on; --pr-ml-span 100000; --bG 16 --grow-node-trunc-r -1; --pr-v-key xs when safe;
   // then --grow-r-from-v on if its requirements hold.
+  // G mode: lazy unless --g-sweep is given; without it, states where lazy cannot run.
+  {
+    bool gs_given = false;
+    for (int k = 1; k < argc; ++k)
+      if (std::strcmp(argv[k], "--g-sweep") == 0) gs_given = true;
+    if (!gs_given && g_sweep == G_SWEEP_LAZY &&
+        (pk_l2r != 1 || (sweep_set && !p2_sweep) || g_trace_p >= 0)) {
+      g_sweep = G_SWEEP_STATES;
+      if (pk_l2r == 1)
+        std::fprintf(stderr, "[defaults] --g-sweep states: lazy needs --sweep on and no --g-trace\n");
+    }
+  }
   if (pk_l2r == 1) {
     auto given = [&](const char* f) {
       for (int k = 1; k < argc; ++k)

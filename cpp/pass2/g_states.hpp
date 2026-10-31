@@ -1,4 +1,4 @@
-// Pass 2, G through the multiloop states (--g-sweep states, paper default): sw_hyper_push
+// Pass 2, G through the multiloop states (--g-sweep states, the paper-v1 G): sw_hyper_push
 // pushes G entries (p', q') through Qm / Qm2 / pair states (edges E1-E9) of the nested
 // pre-pass, cutting each state to its top b_G entries by C_pre(p'-1) G S_pre(q'+1)
 // (cap_ga). pass2_apply rewrites Q^z_pre / pair lists / growth ranking when pass-2 flags ask.

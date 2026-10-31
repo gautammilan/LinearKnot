@@ -30,14 +30,17 @@ Never add `-ffast-math` or FMA contraction: results are compared bit for bit.
 | 1 | nested (pseudoknot-free) pre-pass, LinearPartition style: Q^b_pre, Q^m_pre, Q^m2_pre inside, nested outside, S̄_pre, C_pre | b1 | `--b1` | `nest_beam` |
 | 2 | Q^z_pre (gap partition function) kept starts; nested tables Qb, Qm, Qm2, Qmp, Qp of the scan | b2 | `--b2` | `table_beam[BT_QB..BT_QP]`, `b2_width` |
 | 2 | V^pre: future partner-stem profile, entries x_s.y_s per pair, cut by V S̄_pre[y_s+1] | b_V | `--bV` | `pr_vcap`, `p2_v_cap` |
-| 2 | G (growth table G_L, Ĝ): entries (p', q') per state, cut by C_pre(p'-1) G S̄_pre(q'+1) | b_G | `--bG` | `g_ntr_K` |
-| 2 / 3 | lazy G (`--g-sweep lazy`): pass 2 records the same hypergraph; the scan pulls H_s(q') = Σ_p' Ĉ(p'-1) G_s(p', q') per node, cut by H u_L(q') (`--bG-node-key ul`, default; `sbar`: H S̄_pre(q'+1)); the read keeps K_read right ends. `[g-read]` prints `g_mode node_K node_key read_K` | K (default 32), K_read (default K) | `--g-sweep lazy`, `--bG-node`, `--bG-node-key sbar\|ul`, `--bG-read` | `g_lz_K`, `g_lz_key`, `g_ntr_K` |
+| 2 | states G (`--g-sweep states`, the paper-v1 G): entries (p', q') per state, cut by C_pre(p'-1) G S̄_pre(q'+1) | b_G | `--bG` | `g_ntr_K` |
+| 2 / 3 | lazy G (`--g-sweep lazy`, the default G mode): pass 2 records the same hypergraph; the scan pulls H_s(q') = Σ_p' Ĉ(p'-1) G_s(p', q') per node, cut by H u_L(q') (`--bG-node-key ul`, default; `sbar`: H S̄_pre(q'+1)); the read keeps K_read right ends. `[g-read]` prints `g_mode node_K node_key read_K` | K (default 32), K_read (default K) | `--g-sweep lazy`, `--bG-node`, `--bG-node-key sbar\|ul`, `--bG-read` | `g_lz_K`, `g_lz_key`, `g_ntr_K` |
 | 3 | L2R scan (LR-DP03 inside, `--pk-l2r on`): 4-index pseudoknot states ranked by the pass-2 reads | b4 | `--b4` | `beam`, `l2r_beam`, `rlt_beam` |
 | 3 | scan partial states P1, P2, P3 | (b2, b4, b4) | derived | `l2r_pbeam`, `l2r_tb[PT_P1..]` |
 
 Paper preset (`--preset accurate`): b1 200, b2 1000, b4 3000, b_V 256, b_G 256, P beams
-(b2, b4, b4), G through multiloop states (`--g-sweep states`), linear pass-2 sweep
-(`--sweep on --v-sweep on`). The energy model is not part of the preset:
+(b2, b4, b4), pass-2 sweep (`--sweep on --v-sweep on`). The default G mode is lazy
+(`--g-sweep lazy`: node K 32, key ul, read K = node K); there b_G 256 does not control G.
+`--g-sweep states` gives the states G with b_G 256 and reproduces `paper-v1`. Without
+`--g-sweep`, runs where lazy cannot run (no `--pk-l2r on`, `--sweep off`, `--g-trace`) use
+states. Neither preset writes `--g-sweep`. The energy model is not part of the preset:
 `--material rna1999 --dangles some --param-file dp03/params/rna1999.dG`.
 Width 0 (or `inf`) keeps every state.
 
@@ -74,7 +77,7 @@ deleted (code no run executes, 181 options) and what was kept.
 | `pass2/arms.hpp` | arms: arm_raw / arm_phi give K^pre_L(q'; b, c) = Σ_{f>q'} Q^z_pre(q'+1, f-1) V, S̄_pk; argmax index, arm queries (pr_armq), arm selection (pr_select) | M eq:pra, eq:prK; P2 Phase 0 e) |
 | `pass2/reads_k.hpp` | principled-B reads W, T, K_L, S_L / S_R, U_L / U_R and growth selection; the paper path runs only pr_ub_init and pr_ls_closings (it reads K_L through the scan's lK) | M sec:prstop, eq:prW, eq:prT, eq:prSL, eq:prK, eq:prSR, sec:prbound |
 | `pass2/reads_v.hpp` | growth roots and keys read from V (`--grow-r-from-v`: rfv_root, rfv_key) | M sec:prG |
-| `pass2/g_states.hpp` | G through the multiloop states (paper default); the b_G cut by C_pre(p'-1) G S̄_pre(q'+1) is cap_ga here. Under `--g-sweep lazy` the same loop records the edges (child, parent, w_e) and the stop terms into StemEst::lz* instead of pushing G maps | M sec:prG, eq:prG, eq:prR; P2 Phase 0 d) |
+| `pass2/g_states.hpp` | G through the multiloop states (`--g-sweep states`, the paper-v1 G); the b_G cut by C_pre(p'-1) G S̄_pre(q'+1) is cap_ga here. Under `--g-sweep lazy` the same loop records the edges (child, parent, w_e) and the stop terms into StemEst::lz* instead of pushing G maps | M sec:prG, eq:prG, eq:prR; P2 Phase 0 d) |
 | `pass2/g_lazy.hpp` | lazy G: lz_get pulls H_s(q') = stop'_s(q') + Σ_{e: t→s} w_e H_t(q') on demand (explicit stack, memoized, cut to K by H S̄_pre(q'+1) or H u_L(q')); lz_out_id is the `--out-id` identity with Ĉ = C_pre | M sec:prG |
 | `pass2/g_accum.hpp` | per-state G accumulators (racc_*, ntr_init) and the rec_* growth recursion | M eq:prKls, eq:prKrs |
 | `pass2/sweep.hpp` | the linear V / G sweep (`--sweep on`), `--out-id` identity | |
@@ -100,7 +103,7 @@ deleted (code no run executes, 181 options) and what was kept.
 `--out-id` (in `pass2/sweep.hpp`) reconstructs the outside weight of every kept pair from the
 pass-2 tables and compares it with pass 1's Q^b_b:
 Σ_{p', q'} C_pre(p'-1) G(p', q') S̄_pre(q'+1) = Q^b_b(x, y), and the same for V. With b_V and
-b_G uncapped on RNase P D. radiodurans 1-150 both hold to max relative error 7.8e-13 (V) and
+b_G uncapped under `--g-sweep states` on RNase P D. radiodurans 1-150 both hold to max relative error 7.8e-13 (V) and
 7.4e-13 (G states). Under `--g-sweep lazy --bG-node 0` (in `pass2/g_lazy.hpp`) the check is
 Σ_{q'} H_{x·y}(q') S̄_pre(q'+1) = Q^b_b(x, y) with C_pre as the prefix: 5.7e-13. `make check`
 runs all three and fails above 1e-9.

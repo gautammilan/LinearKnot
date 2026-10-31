@@ -38,7 +38,7 @@ static double g_tr_eps = 1e-6;
 // time, built from its terms' lists; the full layer vectors are never stored.
 static int g_ntr_K = 0;
 enum { G_SWEEP_DIRECT = 0, G_SWEEP_STATES = 1, G_SWEEP_LAZY = 2 };
-static int g_sweep = G_SWEEP_STATES;
+static int g_sweep = G_SWEEP_LAZY;
 // --g-sweep lazy: --bG-node K keeps K entries q' per node (0: all), ranked by
 // H[q'] u_L(q') (--bG-node-key ul, default) or H[q'] Sbar_pre(q'+1) (sbar); --bG-read K_read
 // sets b_G (g_ntr_K) for the read, default K. Ther.ther needs ul and K >= 24.
