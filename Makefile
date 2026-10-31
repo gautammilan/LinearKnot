@@ -3,7 +3,7 @@
 CXX      ?= g++
 CXXFLAGS ?= -O3 -std=c++17 -ffp-contract=off -Wall -Wextra
 BIN      ?= build/dp03
-# NUPACK rna1999 parameters; not in the repository.
+# NUPACK rna1999 parameters (tracked).
 PARAM_FILE ?= dp03/params/rna1999.dG
 
 SRCS := $(shell find cpp -name '*.cpp' -o -name '*.hpp')
