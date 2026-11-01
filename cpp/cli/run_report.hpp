@@ -67,10 +67,11 @@
                    dp.rfv_look_s, dp.rfv_miss_s, dp.rfv_key0_u, dp.rfv_part_u, dp.rfv_key0_r,
                    dp.vfb_n);
       std::fprintf(stderr,
-                   "[stage] rfvmemo n %d on %d entries %zu hits %lld miss %lld approx_mb %.1f\n",
+                   "[stage] rfvmemo n %d on %d entries %zu peak_step %zu hits %lld miss %lld "
+                   "refused %lld approx_mb %.1f\n",
                    static_cast<int>(seq.size()), dp.rfv_memo_on ? 1 : 0,
-                   dp.rfvMemo[0].size() + dp.rfvMemo[1].size(), dp.rfv_memo_hit,
-                   dp.rfv_memo_miss,
+                   dp.rfvMemo[0].size() + dp.rfvMemo[1].size(), dp.rfv_memo_peak,
+                   dp.rfv_memo_hit, dp.rfv_memo_miss, dp.rfv_memo_refused,
                    static_cast<double>(dp.rfvMemo[0].size() + dp.rfvMemo[1].size()) *
                        static_cast<double>(sizeof(uint64_t) + sizeof(DP03::RfvMemoEnt) + 2) /
                        1048576.0);

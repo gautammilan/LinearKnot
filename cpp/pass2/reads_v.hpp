@@ -192,17 +192,21 @@
   FastMap<uint64_t, RfvMemoEnt> rfvMemo[2];
   long long rfv_memo_hit = 0, rfv_memo_miss = 0;
   // The reuse this memo lives on is the same (p, q, xs) question coming back from different
-  // (x, y) pairs of a step and from later steps: 87.5% hits on RP150 lazy, and the same 3.65M
-  // hits over 521K entries on the uncapped runs of tests/identity_check.sh. It is not there for
-  // every input though: an uncut lazy G read (--bG-read 1e7 with an uncut V) asks each key once,
-  // and the table then costs a random access per call for nothing. So the first kRfvMemoWarm
-  // calls decide, a table that is not paying for itself is dropped and not refilled, and a hard
-  // entry cap bounds the memory on long inputs. Neither changes a value or a [vmiss] counter:
-  // a disabled memo recomputes exactly what the uncached code computed, and a hit replays it.
+  // (x, y) pairs inside one step: 87.5% hits on RP150 lazy. Because q is in the key and the only
+  // caller passes the step, no entry outlives its step, so the tables are cleared when q moves
+  // on. It is not there for every input though: an uncut lazy G read (--bG-read 1e7 with an
+  // uncut V) asks each key once, and the table then costs a random access per call for nothing.
+  // So the first kRfvMemoWarm calls decide, a table that is not paying for itself is dropped and
+  // not refilled, and a hard entry cap stays as a backstop. None of the three changes a value or
+  // a [vmiss] counter: a disabled or cleared memo recomputes exactly what the uncached code
+  // computed, and a hit replays it.
   static constexpr long long kRfvMemoWarm = 200000;   // calls before the hit rate is judged
   static constexpr long long kRfvMemoMinHit = 50000;  // 25% of the warmup, else off
   static constexpr size_t kRfvMemoMax = 16u << 20;    // entries per map, memory backstop
   bool rfv_memo_on = true;
+  int rfv_memo_q = -1;             // the step whose keys the tables hold (-1: none yet)
+  size_t rfv_memo_peak = 0;        // entries live in the busiest step
+  long long rfv_memo_refused = 0;  // inserts refused by kRfvMemoMax (must stay 0)
   // U key (ls / rs of p at step q): sum over its closings c of w_c V(c.x, c.y) at xs
   double rfv_key(bool ls, int p, bool seed, int q, int xs) {
     if (p2_vsweep) {
@@ -212,6 +216,17 @@
       const uint64_t mkey = key3(p, 2 * q + (seed ? 1 : 0), xs);
       auto& m = rfvMemo[ls ? 1 : 0];
       if (memo) {
+        if (q != rfv_memo_q) {
+          // q is in the key and only ever equals the step j (scan_prune.hpp:92), and j runs
+          // upwards once per step (scan_driver.hpp:25): an entry written at another q can
+          // never be found again, so dropping it here cannot change any returned value.
+          // clear() keeps the bucket array and the value blocks (:1404-1406, :1016-1024,
+          // :786-793), so a step reuses the memory of its predecessor instead of
+          // reallocating, and the 16M cap below is out of reach.
+          rfvMemo[0].clear();
+          rfvMemo[1].clear();
+          rfv_memo_q = q;
+        }
         auto mt = m.find(mkey);
         if (mt != m.end()) {
           ++rfv_memo_hit;
@@ -256,11 +271,16 @@
         if (m.size() < kRfvMemoMax) {
           m.emplace(mkey, RfvMemoEnt{s, static_cast<uint32_t>(k1), static_cast<uint32_t>(k2),
                                      static_cast<uint32_t>(k3)});
+          const size_t live = rfvMemo[0].size() + rfvMemo[1].size();
+          if (live > rfv_memo_peak) rfv_memo_peak = live;
+        } else {
+          ++rfv_memo_refused;
         }
         if (rfv_memo_hit + rfv_memo_miss == kRfvMemoWarm && rfv_memo_hit < kRfvMemoMinHit) {
           rfv_memo_on = false;  // no reuse in this run: stop caching
           rfvMemo[0].clear();
           rfvMemo[1].clear();
+          rfv_memo_q = -1;
         }
       }
       return s;
