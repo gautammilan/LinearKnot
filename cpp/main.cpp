@@ -145,7 +145,7 @@ void usage() {
   std::fprintf(stderr,
                "usage: dp03 [--b1 N] [--b2 N] [--b4 N] [--bV N] [--bG N] < sequences\n"
                "  --b1  beam of the nested pre-pass (pass I)          default 200\n"
-               "  --b2  beam of the two-index states (pass III)       default 1000\n"
+               "  --b2  beam of the two-index states (pass III)       default 100\n"
                "  --b4  beam of the four-index pseudoknot states (pass III)  default 3000\n"
                "  --bV  beam of V (pass II)                           default 256\n"
                "  --bG  beam of G (pass II)                           default 32\n"
@@ -155,7 +155,8 @@ void usage() {
 
 // Paper setting: what --preset accurate expands to, with --bG 32 (lazy G node beam; the
 // public default) instead of the historical states-mode --bG 256, plus the energy model and
-// lazy G key. Always prepended before user arguments so a bare run matches the paper.
+// lazy G key. Always prepended before user arguments. --b2 100 is appended after that
+// expansion so it matches the main accuracy table; a user --b2 still overrides.
 void append_paper_defaults(std::vector<std::string>& args_s) {
   args_s.push_back("--b1");
   args_s.push_back("200");
@@ -184,6 +185,8 @@ void append_paper_defaults(std::vector<std::string>& args_s) {
         "--sweep", "on", "--v-sweep", "on", "--grammar", "full", "--ml-lead-cap", "30",
         "--material", "rna1999", "--dangles", "some", "--g-sweep", "lazy", "--bG-node-key", "ul"})
     args_s.push_back(x);
+  args_s.push_back("--b2");
+  args_s.push_back("100");
 }
 
 }  // namespace

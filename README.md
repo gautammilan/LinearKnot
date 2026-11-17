@@ -66,7 +66,7 @@ Diagnostics go to stderr; redirect them with `2> file`.
 | flag | meaning | default |
 |---|---|---|
 | `--b1` | beam of the nested pre-pass (pass I) | 200 |
-| `--b2` | beam of the two-index states (pass III) | 1000 |
+| `--b2` | beam of the two-index states (pass III) | 100 |
 | `--b4` | beam of the four-index pseudoknot states (pass III) | 3000 |
 | `--bV` | beam of V (pass II) | 256 |
 | `--bG` | beam of G (pass II) | 32 |
@@ -80,10 +80,11 @@ Rough speed: a 150 nt sequence takes about 25 s on one core. The binary is singl
 The LinearKnot rows of the main accuracy table were run with:
 
 ```bash
-build/dp03 --b2 100 --b4 3000 < sequences.txt > predictions.txt
+build/dp03 < sequences.txt > predictions.txt            # b4 = 3000 row
+build/dp03 --b4 1000 < sequences.txt > predictions.txt  # b4 = 1000 row
 ```
 
-(`--b4 1000` for the b4 = 1000 row.) Structures are taken from the pair probabilities with ThreshKnot (threshold 0.3).
+Structures are taken from the pair probabilities with ThreshKnot (threshold 0.3).
 
 ## Repository layout
 
