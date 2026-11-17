@@ -45,14 +45,15 @@ clocks cost nothing (`tasks/2026-10-31-performance-pass.md`).
 | 3 | L2R scan (LR-DP03 inside, `--pk-l2r on`): 4-index pseudoknot states ranked by the pass-2 reads | b4 | `--b4` | `beam`, `l2r_beam`, `rlt_beam` |
 | 3 | scan partial states P1, P2, P3 | (b2, b4, b4) | derived | `l2r_pbeam`, `l2r_tb[PT_P1..]` |
 
-Paper preset (`--preset accurate`): b1 200, b2 1000, b4 3000, b_V 256, b_G 256, P beams
-(b2, b4, b4), pass-2 sweep (`--sweep on --v-sweep on`). The default G mode is lazy
-(`--g-sweep lazy`: node K 32, key ul, read K = node K); there b_G 256 does not control G.
-`--g-sweep states` gives the states G with b_G 256 and reproduces `paper-v1`. Without
-`--g-sweep`, runs where lazy cannot run (no `--pk-l2r on`, `--sweep off`, `--g-trace`) use
-states. Neither preset writes `--g-sweep`. The energy model is not part of the preset:
-`--material rna1999 --dangles some --param-file dp03/params/rna1999.dG`.
-Width 0 (or `inf`) keeps every state.
+Default run (no flags): the paper setting is always prepended before user arguments. Beams
+b1 200, b2 1000, b4 3000, b_V 256, b_G 32, P beams (b2, b4, b4), pass-2 sweep
+(`--sweep on --v-sweep on`), G mode lazy with node key ul (read K = node K), energy model
+`--material rna1999 --dangles some` (parameter file `../dp03/params/rna1999.dG` next to the
+binary). Public flags are only `--b1` `--b2` `--b4` `--bV` `--bG`; `--bG N` sets the lazy
+node beam and the states-mode b_G. Older flags (`--preset`, `--g-sweep`, `--bG-node`,
+`--bG-node-key`, `--material`, ...) remain parseable for scripts and `make check` but are
+not listed in usage. `--preset accurate` still expands to the historical beams including
+`--bG 256` (for `--g-sweep states` / `paper-v1`). Width 0 (or `inf`) keeps every state.
 
 ## Files
 

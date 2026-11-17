@@ -143,33 +143,79 @@ std::string normalize(const std::string& s) {
 
 void usage() {
   std::fprintf(stderr,
-               "usage: dp03_cpp [--preset default|accurate] [--b1 N] [--b2 N] [--b4 N] [--bV N] [--bG N] "
-               "[--g-sweep direct|states|lazy] [--bG-node K] [--bG-read K] [--bG-node-key ul|sbar] [--loop-cap L] [--ml-lead-cap N|n] [--max-loop M] "
-               "[--rt RT] [--wc-ends] [--cutoff C] [--no-bpp] [--gap-beam group|step] "
-               "[--material dp03|rna1999|vienna2004 [--param-file PATH] [--dangles none|some|all|d2]] "
-               "< sequences\n");
+               "usage: dp03 [--b1 N] [--b2 N] [--b4 N] [--bV N] [--bG N] < sequences\n"
+               "  --b1  beam of the nested pre-pass (pass I)          default 200\n"
+               "  --b2  beam of the two-index states (pass III)       default 1000\n"
+               "  --b4  beam of the four-index pseudoknot states (pass III)  default 3000\n"
+               "  --bV  beam of V (pass II)                           default 256\n"
+               "  --bG  beam of G (pass II)                           default 32\n"
+               "Input: one sequence per line, optional \">name\" lines. Output: logZ and pair "
+               "probabilities on stdout; diagnostics on stderr.\n");
+}
+
+// Paper setting: what --preset accurate expands to, with --bG 32 (lazy G node beam; the
+// public default) instead of the historical states-mode --bG 256, plus the energy model and
+// lazy G key. Always prepended before user arguments so a bare run matches the paper.
+void append_paper_defaults(std::vector<std::string>& args_s) {
+  args_s.push_back("--b1");
+  args_s.push_back("200");
+  args_s.push_back("--b2");
+  args_s.push_back("1000");
+  args_s.push_back("--b4");
+  args_s.push_back("3000");
+  args_s.push_back("--bV");
+  args_s.push_back("256");
+  args_s.push_back("--bG");
+  args_s.push_back("32");
+  for (const char* x :
+       {"--gap-beam", "step", "--loop-cap", "30", "--max-loop", "30", "--wc-ends", "--rt", "0.6163207755",
+        "--cutoff", "1e-5", "--stem-est", "rank", "--stem-est-role", "all", "--stem-est-loop", "0",
+        "--stem-est-qg-r", "partner", "--stem-est-qg-ext", "loop", "--stem-est-grow-loop", "2",
+        "--stem-est-helpers", "grow",
+        "--stem-est-principled", "on", "--pr-partner-floor", "1e-20", "--pr-grow-select", "bound",
+        "--pr-grow-eps", "1e-6", "--pr-cut", "0", "--pr-armq-sep", "on", "--pr-fast", "ml", "--pr-abl", "sepv",
+        "--grow-ml-c", "16", "--grow-trunc", "16", "--grow-trunc-mode", "side",
+        "--pk-l2r", "on", "--l2r-spawn", "inc",
+        "--l2r-p3-hex", "on",
+        "--l2r-p3-lin", "on", "--pr-ml-span", "100000", "--grow-ml-ub", "on", "--pr-v-key", "xs",
+        "--pr-v-eps", "0", "--pr-v-trim", "suffix", "--pr-v-stream", "on",
+        "--pr-v-mlk", "0", "--grow-node-trunc-r", "-1",
+        "--grow-node-trunc-z", "bar", "--grow-r-from-v", "on", "--malloc-trim", "on",
+        "--sweep", "on", "--v-sweep", "on", "--grammar", "full", "--ml-lead-cap", "30",
+        "--material", "rna1999", "--dangles", "some", "--g-sweep", "lazy", "--bG-node-key", "ul"})
+    args_s.push_back(x);
 }
 
 }  // namespace
 #include "common/timers.hpp"
 int main(int argc, char** argv) {
 #include "cli/options.hpp"
-  // --preset default|accurate expands in place (options after it override; before are
-  // overridden). Energy model (--material, --dangles, --param-file) is not part of it.
-  // Paper beams are --b1/--b2/--b4/--bV/--bG; pbeam is derived as (b2,b4,b4).
-  // accurate = paper values; default = smaller b4/bG.
-  // Scripts should pass --preset only (no extra beam flags).
+  // Always prepend the paper setting (accurate expansion + rna1999/some + lazy G). User
+  // arguments follow and override. --preset default|accurate remains parseable for old
+  // scripts (options after it override; before are overridden). Paper beams are
+  // --b1/--b2/--b4/--bV/--bG; pbeam is derived as (b2,b4,b4).
+
+  for (int a = 1; a < argc; ++a) {
+    if (std::string(argv[a]) == "-h" || std::string(argv[a]) == "--help") {
+      usage();
+      return 0;
+    }
+  }
 
   std::vector<std::string> args_s;
-  for (int a = 0; a < argc; ++a) {
-    if (a > 0 && std::string(argv[a]) == "--preset") {
+  args_s.push_back(argv[0] ? argv[0] : "dp03");
+  const std::size_t defaults_begin = args_s.size();
+  append_paper_defaults(args_s);
+  const std::size_t defaults_end = args_s.size();
+  for (int a = 1; a < argc; ++a) {
+    if (std::string(argv[a]) == "--preset") {
       const std::string p = a + 1 < argc ? argv[++a] : "";
       if (p != "default" && p != "accurate") {
         std::fprintf(stderr, "--preset must be 'default' or 'accurate'\n");
         return 2;
       }
       const bool acc = (p == "accurate");
-      // Paper preset beams (accurate) / smaller default. pbeam = (b2,b4,b4) after parse.
+      // Historical preset beams (accurate keeps --bG 256 for --g-sweep states scripts).
       args_s.push_back("--b1");
       args_s.push_back("200");
       args_s.push_back("--b2");
@@ -200,9 +246,9 @@ int main(int argc, char** argv) {
       args_s.push_back(argv[a]);
     }
   }
-  if (static_cast<int>(args_s.size()) != argc) {
-    std::string line = "[preset] expanded:";
-    for (std::size_t k = 1; k < args_s.size(); ++k) line += " " + args_s[k];
+  {
+    std::string line = "[defaults]";
+    for (std::size_t k = defaults_begin; k < defaults_end; ++k) line += " " + args_s[k];
     std::fprintf(stderr, "%s\n", line.c_str());
   }
   std::vector<char*> args_v;

@@ -270,7 +270,11 @@
       pr_vstream = std::string(next()) == "on";
     }
     else if (arg == "--bG") {
-      g_ntr_K = std::atoi(next());
+      // Lazy G: --bG is the node beam (--bG-node); the read beam defaults to the node beam.
+      // States G: --bG is still b_G (g_ntr_K). Explicit --bG-node / --bG-read later override.
+      const int n = std::atoi(next());
+      g_ntr_K = n;
+      g_lz_K = n;
     }
     else if (arg == "--g-sweep") {
       const std::string s = next();
