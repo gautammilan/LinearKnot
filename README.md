@@ -97,7 +97,6 @@ Structures are taken from the pair probabilities with ThreshKnot (threshold 0.3)
 | `dp03/params/rna1999.dG` | NUPACK rna1999 parameters |
 | `tests/` | `make check` script and test sequence |
 | `docs/ARCHITECTURE.md` | file-by-file map of the algorithm and beams |
-| `docs/notebook/` | development notebook (results, ablations) |
 
 ## Citation
 

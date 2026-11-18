@@ -18,8 +18,8 @@ Parts under `cpp/pass*/`, `cpp/exact/`, `cpp/diag/` and `cpp/common/dp03_state.h
 fragments of `class DP03`; parts under `cpp/cli/` are fragments of `main()`. None of them is a
 standalone header. `cpp/dp03_l2r_merged.cpp` is a shim that includes `main.cpp`. At tag
 `paper-v1-build` the shim build is byte-identical to the paper-v1 binary (md5
-48d4b172c657d3825eef86d7a31b5793). After the dead-code pass (`docs/UNUSED_CODE.md`) the binary
-differs; logZ on the paper preset and the identity check are unchanged.
+48d4b172c657d3825eef86d7a31b5793). After the dead-code pass the binary differs; logZ on the
+paper preset and the identity check are unchanged.
 
 Never add `-ffast-math` or FMA contraction: results are compared bit for bit.
 
@@ -31,7 +31,7 @@ cannot change a result; do not use `FastMap` for a map whose iteration order fee
 
 Optional build knob: `-DLK_FINE_TIMERS` compiles the pass-2/pass-3 sub-stage clocks back in and
 makes the binary print the `[fine]` attribution line. Without it those fields stay 0 and the
-clocks cost nothing (`tasks/2026-10-31-performance-pass.md`).
+clocks cost nothing.
 
 ## Passes and beams
 
@@ -57,11 +57,9 @@ not listed in usage. `--preset accurate` still expands to the historical beams i
 
 ## Files
 
-References: **M** = `docs/LinearNupack_math.tex` (section / equation labels), **P2** =
-`LINEAR_PASS2.md`, **R** = `docs/LinearNupack_report.tex` (M and R are in the main checkout,
-not tracked yet). Paper section and equation numbers: to fill when the manuscript is in the
-repository. `docs/UNUSED_CODE.md` records the dead-code pass: the coverage runs, what was
-deleted (code no run executes, 181 options) and what was kept.
+References: **M** = math notes (section / equation labels), **P2** = pass-2 notes, **R** =
+report notes. Paper section and equation numbers: to fill when the manuscript is in the
+repository.
 
 | file | computes | reference |
 |---|---|---|
